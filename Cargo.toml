@@ -21,6 +21,11 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0.101"
 ansi-to-tui = "8.0.1"
+# Native Rust SDK that wraps the `claude` CLI binary the same way the
+# Node bridge wraps `@anthropic-ai/claude-agent-sdk`. Path dependency
+# during local development; will move to a published version once
+# forge-sdk gets a release.
+forge-sdk = { path = "../forge/crates/forge-sdk" }
 arboard = { version = "3.6.1", features = ["image-data"] }
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
