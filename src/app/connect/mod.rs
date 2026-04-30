@@ -52,6 +52,9 @@ fn resolve_startup_cwd(cli: &Cli) -> PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
+/// Used only by the legacy Node-bridge spawn path; PR #3 deletes this
+/// alongside the rest of the Node-bridge cleanup.
+#[allow(dead_code)]
 fn extract_app_error(err: &anyhow::Error) -> Option<AppError> {
     err.chain().find_map(|cause| cause.downcast_ref::<AppError>().cloned())
 }
@@ -59,6 +62,10 @@ fn extract_app_error(err: &anyhow::Error) -> Option<AppError> {
 struct StartConnectionParams {
     event_tx: mpsc::UnboundedSender<ClientEvent>,
     cwd_raw: String,
+    /// Custom path to the legacy Node bridge script. Unused by the
+    /// forge-sdk backend; PR #3 removes it alongside the rest of the
+    /// Node-bridge cleanup.
+    #[allow(dead_code)]
     bridge_script: Option<std::path::PathBuf>,
     resume_id: Option<String>,
     resume_requested: bool,
