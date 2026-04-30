@@ -4,12 +4,14 @@
 //! Bridge event dispatch: routes incoming `BridgeEvent` envelopes to appropriate
 //! `ClientEvent` messages, and handles permission request/response forwarding.
 
+use crate::agent::client::AgentBridge;
 use crate::agent::error_handling::parse_turn_error_class;
 use crate::agent::events::ClientEvent;
 use crate::agent::model;
 use crate::agent::types;
-use crate::agent::wire::{BridgeCommand, CommandEnvelope, EventEnvelope};
+use crate::agent::wire::EventEnvelope;
 use crate::error::AppError;
+use std::rc::Rc;
 use tokio::sync::mpsc;
 
 use super::bridge_lifecycle::emit_connection_failed;
@@ -30,7 +32,7 @@ struct ConnectedEventData {
 #[allow(clippy::too_many_lines)]
 pub(super) fn handle_bridge_event(
     event_tx: &mpsc::UnboundedSender<ClientEvent>,
-    cmd_tx: &mpsc::UnboundedSender<CommandEnvelope>,
+    agent: &Rc<dyn AgentBridge>,
     connected_once: &mut bool,
     resume_requested: bool,
     envelope: EventEnvelope,
@@ -69,10 +71,10 @@ pub(super) fn handle_bridge_event(
             }
         }
         crate::agent::wire::BridgeEvent::PermissionRequest { session_id, request } => {
-            handle_permission_request_event(event_tx, cmd_tx, session_id, request);
+            handle_permission_request_event(event_tx, agent, session_id, request);
         }
         crate::agent::wire::BridgeEvent::QuestionRequest { session_id, request } => {
-            handle_question_request_event(event_tx, cmd_tx, session_id, request);
+            handle_question_request_event(event_tx, agent, session_id, request);
         }
         crate::agent::wire::BridgeEvent::ElicitationRequest { session_id, request } => {
             handle_elicitation_request_event(event_tx, &session_id, request);
@@ -197,14 +199,19 @@ fn handle_connected_event(
 
 fn handle_permission_request_event(
     event_tx: &mpsc::UnboundedSender<ClientEvent>,
-    cmd_tx: &mpsc::UnboundedSender<CommandEnvelope>,
+    agent: &Rc<dyn AgentBridge>,
     session_id: String,
     request: types::PermissionRequest,
 ) {
     let (request, tool_call_id) = map_permission_request(&session_id, request);
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
     if event_tx.send(ClientEvent::PermissionRequest { request, response_tx }).is_ok() {
-        spawn_permission_response_forwarder(cmd_tx.clone(), response_rx, session_id, tool_call_id);
+        spawn_permission_response_forwarder(
+            Rc::clone(agent),
+            response_rx,
+            session_id,
+            tool_call_id,
+        );
     } else {
         tracing::error!(
             target: crate::logging::targets::APP_PERMISSION,
@@ -219,14 +226,19 @@ fn handle_permission_request_event(
 
 fn handle_question_request_event(
     event_tx: &mpsc::UnboundedSender<ClientEvent>,
-    cmd_tx: &mpsc::UnboundedSender<CommandEnvelope>,
+    agent: &Rc<dyn AgentBridge>,
     session_id: String,
     request: types::QuestionRequest,
 ) {
     let (request, tool_call_id) = map_question_request(&session_id, request);
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
     if event_tx.send(ClientEvent::QuestionRequest { request, response_tx }).is_ok() {
-        spawn_question_response_forwarder(cmd_tx.clone(), response_rx, session_id, tool_call_id);
+        spawn_question_response_forwarder(
+            Rc::clone(agent),
+            response_rx,
+            session_id,
+            tool_call_id,
+        );
     } else {
         tracing::error!(
             target: crate::logging::targets::APP_PERMISSION,
@@ -256,7 +268,7 @@ fn handle_elicitation_request_event(
 }
 
 fn spawn_permission_response_forwarder(
-    cmd_tx: mpsc::UnboundedSender<CommandEnvelope>,
+    agent: Rc<dyn AgentBridge>,
     response_rx: tokio::sync::oneshot::Receiver<model::RequestPermissionResponse>,
     session_id: String,
     tool_call_id: String,
@@ -285,38 +297,36 @@ fn spawn_permission_response_forwarder(
         };
         let session_id_for_log = session_id.clone();
         let tool_call_id_for_log = tool_call_id.clone();
-        if cmd_tx
-            .send(CommandEnvelope {
-                request_id: None,
-                command: BridgeCommand::PermissionResponse { session_id, tool_call_id, outcome },
-            })
-            .is_ok()
-        {
-            tracing::info!(
-                target: crate::logging::targets::APP_PERMISSION,
-                event_name = "permission_response_forwarded",
-                message = "permission response forwarded to bridge",
-                outcome = "success",
-                session_id = %session_id_for_log,
-                tool_call_id = %tool_call_id_for_log,
-                selected_option = %selected_option,
-            );
-        } else {
-            tracing::error!(
-                target: crate::logging::targets::APP_PERMISSION,
-                event_name = "permission_response_forward_failed",
-                message = "failed to forward permission response to bridge",
-                outcome = "failure",
-                session_id = %session_id_for_log,
-                tool_call_id = %tool_call_id_for_log,
-                selected_option = %selected_option,
-            );
+        match agent.permission_response(session_id, tool_call_id, outcome) {
+            Ok(()) => {
+                tracing::info!(
+                    target: crate::logging::targets::APP_PERMISSION,
+                    event_name = "permission_response_forwarded",
+                    message = "permission response forwarded to bridge",
+                    outcome = "success",
+                    session_id = %session_id_for_log,
+                    tool_call_id = %tool_call_id_for_log,
+                    selected_option = %selected_option,
+                );
+            }
+            Err(err) => {
+                tracing::error!(
+                    target: crate::logging::targets::APP_PERMISSION,
+                    event_name = "permission_response_forward_failed",
+                    message = "failed to forward permission response to bridge",
+                    outcome = "failure",
+                    session_id = %session_id_for_log,
+                    tool_call_id = %tool_call_id_for_log,
+                    selected_option = %selected_option,
+                    error = %err,
+                );
+            }
         }
     });
 }
 
 fn spawn_question_response_forwarder(
-    cmd_tx: mpsc::UnboundedSender<CommandEnvelope>,
+    agent: Rc<dyn AgentBridge>,
     response_rx: tokio::sync::oneshot::Receiver<model::RequestQuestionResponse>,
     session_id: String,
     tool_call_id: String,
@@ -351,32 +361,30 @@ fn spawn_question_response_forwarder(
         };
         let session_id_for_log = session_id.clone();
         let tool_call_id_for_log = tool_call_id.clone();
-        if cmd_tx
-            .send(CommandEnvelope {
-                request_id: None,
-                command: BridgeCommand::QuestionResponse { session_id, tool_call_id, outcome },
-            })
-            .is_ok()
-        {
-            tracing::info!(
-                target: crate::logging::targets::APP_PERMISSION,
-                event_name = "question_response_forwarded",
-                message = "question response forwarded to bridge",
-                outcome = "success",
-                session_id = %session_id_for_log,
-                tool_call_id = %tool_call_id_for_log,
-                selected_option_count,
-            );
-        } else {
-            tracing::error!(
-                target: crate::logging::targets::APP_PERMISSION,
-                event_name = "question_response_forward_failed",
-                message = "failed to forward question response to bridge",
-                outcome = "failure",
-                session_id = %session_id_for_log,
-                tool_call_id = %tool_call_id_for_log,
-                selected_option_count,
-            );
+        match agent.question_response(session_id, tool_call_id, outcome) {
+            Ok(()) => {
+                tracing::info!(
+                    target: crate::logging::targets::APP_PERMISSION,
+                    event_name = "question_response_forwarded",
+                    message = "question response forwarded to bridge",
+                    outcome = "success",
+                    session_id = %session_id_for_log,
+                    tool_call_id = %tool_call_id_for_log,
+                    selected_option_count,
+                );
+            }
+            Err(err) => {
+                tracing::error!(
+                    target: crate::logging::targets::APP_PERMISSION,
+                    event_name = "question_response_forward_failed",
+                    message = "failed to forward question response to bridge",
+                    outcome = "failure",
+                    session_id = %session_id_for_log,
+                    tool_call_id = %tool_call_id_for_log,
+                    selected_option_count,
+                    error = %err,
+                );
+            }
         }
     });
 }
