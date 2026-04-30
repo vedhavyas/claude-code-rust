@@ -5,7 +5,7 @@
 //! and connection slot management.
 
 use crate::agent::bridge::BridgeLauncher;
-use crate::agent::client::{AgentConnection, BridgeClient};
+use crate::agent::client::{AgentBridge, AgentConnection, BridgeClient};
 use crate::agent::events::ClientEvent;
 use crate::agent::wire::{BridgeCommand, BridgeEvent, CommandEnvelope};
 use crate::error::AppError;
@@ -52,7 +52,9 @@ pub(super) async fn run_connection_task(
 
         let mut connected_once = false;
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<CommandEnvelope>();
-        publish_connection_slot(&conn_slot_writer, &cmd_tx);
+        let agent: Rc<dyn AgentBridge> =
+            Rc::new(AgentConnection::new(cmd_tx.clone())) as Rc<dyn AgentBridge>;
+        publish_connection_slot(&conn_slot_writer, Rc::clone(&agent));
 
         if !send_initialize_command(&params, &mut bridge).await {
             return;
@@ -60,7 +62,7 @@ pub(super) async fn run_connection_task(
         if let Err(app_error) = wait_for_bridge_initialized(
             &mut bridge,
             &params.event_tx,
-            &cmd_tx,
+            &agent,
             &mut connected_once,
             params.resume_requested,
         )
@@ -77,7 +79,7 @@ pub(super) async fn run_connection_task(
             return;
         }
 
-        bridge_event_loop(&params, &mut bridge, &cmd_tx, &mut cmd_rx, &mut connected_once).await;
+        bridge_event_loop(&params, &mut bridge, &agent, &mut cmd_rx, &mut connected_once).await;
     }
     .instrument(connection_span)
     .await;
@@ -128,10 +130,9 @@ fn spawn_bridge_client(
 
 fn publish_connection_slot(
     conn_slot_writer: &Rc<std::cell::RefCell<Option<ConnectionSlot>>>,
-    cmd_tx: &mpsc::UnboundedSender<CommandEnvelope>,
+    agent: Rc<dyn AgentBridge>,
 ) {
-    *conn_slot_writer.borrow_mut() =
-        Some(ConnectionSlot { conn: Rc::new(AgentConnection::new(cmd_tx.clone())) });
+    *conn_slot_writer.borrow_mut() = Some(ConnectionSlot { conn: agent });
 }
 
 async fn send_initialize_command(
@@ -230,7 +231,7 @@ async fn send_session_command(params: &StartConnectionParams, bridge: &mut Bridg
 async fn bridge_event_loop(
     params: &StartConnectionParams,
     bridge: &mut BridgeClient,
-    cmd_tx: &mpsc::UnboundedSender<CommandEnvelope>,
+    agent: &Rc<dyn AgentBridge>,
     cmd_rx: &mut mpsc::UnboundedReceiver<CommandEnvelope>,
     connected_once: &mut bool,
 ) {
@@ -251,7 +252,7 @@ async fn bridge_event_loop(
                     Ok(Some(envelope)) => {
                         handle_bridge_event(
                             &params.event_tx,
-                            cmd_tx,
+                            agent,
                             connected_once,
                             params.resume_requested,
                             envelope,
@@ -297,7 +298,7 @@ pub(super) fn emit_connection_failed(
 pub(super) async fn wait_for_bridge_initialized(
     bridge: &mut BridgeClient,
     event_tx: &mpsc::UnboundedSender<ClientEvent>,
-    cmd_tx: &mpsc::UnboundedSender<CommandEnvelope>,
+    agent: &Rc<dyn AgentBridge>,
     connected_once: &mut bool,
     resume_requested: bool,
 ) -> Result<(), AppError> {
@@ -335,7 +336,7 @@ pub(super) async fn wait_for_bridge_initialized(
                     if matches!(envelope.event, BridgeEvent::ConnectionFailed { .. }) {
                         handle_bridge_event(
                             event_tx,
-                            cmd_tx,
+                            agent,
                             connected_once,
                             resume_requested,
                             envelope,
@@ -344,7 +345,7 @@ pub(super) async fn wait_for_bridge_initialized(
                     }
                     handle_bridge_event(
                         event_tx,
-                        cmd_tx,
+                        agent,
                         connected_once,
                         resume_requested,
                         envelope,

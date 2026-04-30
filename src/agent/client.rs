@@ -315,6 +315,121 @@ fn log_bridge_event_received(envelope: &EventEnvelope, size_bytes: usize) {
     }
 }
 
+/// Behavioural seam between the TUI and the agent backend.
+///
+/// `AgentConnection` is the historical concrete implementation that
+/// forwards each call to a local NDJSON bridge subprocess via an mpsc
+/// channel. Pinning callers to a trait rather than the concrete struct
+/// lets alternative backends (in-process Rust SDKs, remote daemons,
+/// stub implementations for tests) plug in without changing call sites
+/// across `app/*`.
+///
+/// Trait surface mirrors `AgentConnection`'s inherent methods 1:1, plus
+/// the permission and question response paths previously sent directly
+/// over the command channel from `app/connect/event_dispatch.rs`.
+/// All methods are fire-and-forget — outcomes flow back through the
+/// existing `BridgeEvent` stream rather than the trait return value.
+pub trait AgentBridge {
+    fn prompt_text(&self, session_id: String, text: String) -> anyhow::Result<PromptResponse>;
+
+    fn prompt_with_images(
+        &self,
+        session_id: String,
+        text: String,
+        images: Vec<crate::app::clipboard_image::ImageAttachment>,
+    ) -> anyhow::Result<PromptResponse>;
+
+    fn cancel(&self, session_id: String) -> anyhow::Result<()>;
+
+    fn set_mode(&self, session_id: String, mode: String) -> anyhow::Result<()>;
+
+    fn set_model(&self, session_id: String, model: String) -> anyhow::Result<()>;
+
+    fn generate_session_title(
+        &self,
+        session_id: String,
+        description: String,
+    ) -> anyhow::Result<()>;
+
+    fn rename_session(&self, session_id: String, title: String) -> anyhow::Result<()>;
+
+    fn get_status_snapshot(&self, session_id: String) -> anyhow::Result<()>;
+
+    fn get_context_usage(&self, session_id: String) -> anyhow::Result<()>;
+
+    fn reload_plugins(&self, session_id: String) -> anyhow::Result<()>;
+
+    fn get_mcp_snapshot(&self, session_id: String) -> anyhow::Result<()>;
+
+    fn respond_to_elicitation(
+        &self,
+        session_id: String,
+        elicitation_request_id: String,
+        action: crate::agent::types::ElicitationAction,
+        content: Option<serde_json::Value>,
+    ) -> anyhow::Result<()>;
+
+    fn reconnect_mcp_server(
+        &self,
+        session_id: String,
+        server_name: String,
+    ) -> anyhow::Result<()>;
+
+    fn toggle_mcp_server(
+        &self,
+        session_id: String,
+        server_name: String,
+        enabled: bool,
+    ) -> anyhow::Result<()>;
+
+    fn set_mcp_servers(
+        &self,
+        session_id: String,
+        servers: std::collections::BTreeMap<String, crate::agent::types::McpServerConfig>,
+    ) -> anyhow::Result<()>;
+
+    fn authenticate_mcp_server(
+        &self,
+        session_id: String,
+        server_name: String,
+    ) -> anyhow::Result<()>;
+
+    fn clear_mcp_auth(&self, session_id: String, server_name: String) -> anyhow::Result<()>;
+
+    fn submit_mcp_oauth_callback_url(
+        &self,
+        session_id: String,
+        server_name: String,
+        callback_url: String,
+    ) -> anyhow::Result<()>;
+
+    fn new_session(
+        &self,
+        cwd: String,
+        launch_settings: SessionLaunchSettings,
+    ) -> anyhow::Result<()>;
+
+    fn resume_session(
+        &self,
+        session_id: String,
+        launch_settings: SessionLaunchSettings,
+    ) -> anyhow::Result<()>;
+
+    fn permission_response(
+        &self,
+        session_id: String,
+        tool_call_id: String,
+        outcome: crate::agent::types::PermissionOutcome,
+    ) -> anyhow::Result<()>;
+
+    fn question_response(
+        &self,
+        session_id: String,
+        tool_call_id: String,
+        outcome: crate::agent::types::QuestionOutcome,
+    ) -> anyhow::Result<()>;
+}
+
 #[derive(Clone)]
 pub struct AgentConnection {
     command_tx: mpsc::UnboundedSender<CommandEnvelope>,
@@ -550,8 +665,188 @@ impl AgentConnection {
         })
     }
 
+    pub fn permission_response(
+        &self,
+        session_id: String,
+        tool_call_id: String,
+        outcome: crate::agent::types::PermissionOutcome,
+    ) -> anyhow::Result<()> {
+        self.send(CommandEnvelope {
+            request_id: None,
+            command: BridgeCommand::PermissionResponse { session_id, tool_call_id, outcome },
+        })
+    }
+
+    pub fn question_response(
+        &self,
+        session_id: String,
+        tool_call_id: String,
+        outcome: crate::agent::types::QuestionOutcome,
+    ) -> anyhow::Result<()> {
+        self.send(CommandEnvelope {
+            request_id: None,
+            command: BridgeCommand::QuestionResponse { session_id, tool_call_id, outcome },
+        })
+    }
+
     fn send(&self, envelope: CommandEnvelope) -> anyhow::Result<()> {
         self.command_tx.send(envelope).map_err(|_| anyhow::anyhow!("bridge command channel closed"))
+    }
+}
+
+impl AgentBridge for AgentConnection {
+    fn prompt_text(&self, session_id: String, text: String) -> anyhow::Result<PromptResponse> {
+        AgentConnection::prompt_text(self, session_id, text)
+    }
+
+    fn prompt_with_images(
+        &self,
+        session_id: String,
+        text: String,
+        images: Vec<crate::app::clipboard_image::ImageAttachment>,
+    ) -> anyhow::Result<PromptResponse> {
+        AgentConnection::prompt_with_images(self, session_id, text, images)
+    }
+
+    fn cancel(&self, session_id: String) -> anyhow::Result<()> {
+        AgentConnection::cancel(self, session_id)
+    }
+
+    fn set_mode(&self, session_id: String, mode: String) -> anyhow::Result<()> {
+        AgentConnection::set_mode(self, session_id, mode)
+    }
+
+    fn set_model(&self, session_id: String, model: String) -> anyhow::Result<()> {
+        AgentConnection::set_model(self, session_id, model)
+    }
+
+    fn generate_session_title(
+        &self,
+        session_id: String,
+        description: String,
+    ) -> anyhow::Result<()> {
+        AgentConnection::generate_session_title(self, session_id, description)
+    }
+
+    fn rename_session(&self, session_id: String, title: String) -> anyhow::Result<()> {
+        AgentConnection::rename_session(self, session_id, title)
+    }
+
+    fn get_status_snapshot(&self, session_id: String) -> anyhow::Result<()> {
+        AgentConnection::get_status_snapshot(self, session_id)
+    }
+
+    fn get_context_usage(&self, session_id: String) -> anyhow::Result<()> {
+        AgentConnection::get_context_usage(self, session_id)
+    }
+
+    fn reload_plugins(&self, session_id: String) -> anyhow::Result<()> {
+        AgentConnection::reload_plugins(self, session_id)
+    }
+
+    fn get_mcp_snapshot(&self, session_id: String) -> anyhow::Result<()> {
+        AgentConnection::get_mcp_snapshot(self, session_id)
+    }
+
+    fn respond_to_elicitation(
+        &self,
+        session_id: String,
+        elicitation_request_id: String,
+        action: crate::agent::types::ElicitationAction,
+        content: Option<serde_json::Value>,
+    ) -> anyhow::Result<()> {
+        AgentConnection::respond_to_elicitation(
+            self,
+            session_id,
+            elicitation_request_id,
+            action,
+            content,
+        )
+    }
+
+    fn reconnect_mcp_server(
+        &self,
+        session_id: String,
+        server_name: String,
+    ) -> anyhow::Result<()> {
+        AgentConnection::reconnect_mcp_server(self, session_id, server_name)
+    }
+
+    fn toggle_mcp_server(
+        &self,
+        session_id: String,
+        server_name: String,
+        enabled: bool,
+    ) -> anyhow::Result<()> {
+        AgentConnection::toggle_mcp_server(self, session_id, server_name, enabled)
+    }
+
+    fn set_mcp_servers(
+        &self,
+        session_id: String,
+        servers: std::collections::BTreeMap<String, crate::agent::types::McpServerConfig>,
+    ) -> anyhow::Result<()> {
+        AgentConnection::set_mcp_servers(self, session_id, servers)
+    }
+
+    fn authenticate_mcp_server(
+        &self,
+        session_id: String,
+        server_name: String,
+    ) -> anyhow::Result<()> {
+        AgentConnection::authenticate_mcp_server(self, session_id, server_name)
+    }
+
+    fn clear_mcp_auth(&self, session_id: String, server_name: String) -> anyhow::Result<()> {
+        AgentConnection::clear_mcp_auth(self, session_id, server_name)
+    }
+
+    fn submit_mcp_oauth_callback_url(
+        &self,
+        session_id: String,
+        server_name: String,
+        callback_url: String,
+    ) -> anyhow::Result<()> {
+        AgentConnection::submit_mcp_oauth_callback_url(
+            self,
+            session_id,
+            server_name,
+            callback_url,
+        )
+    }
+
+    fn new_session(
+        &self,
+        cwd: String,
+        launch_settings: SessionLaunchSettings,
+    ) -> anyhow::Result<()> {
+        AgentConnection::new_session(self, cwd, launch_settings)
+    }
+
+    fn resume_session(
+        &self,
+        session_id: String,
+        launch_settings: SessionLaunchSettings,
+    ) -> anyhow::Result<()> {
+        AgentConnection::resume_session(self, session_id, launch_settings)
+    }
+
+    fn permission_response(
+        &self,
+        session_id: String,
+        tool_call_id: String,
+        outcome: crate::agent::types::PermissionOutcome,
+    ) -> anyhow::Result<()> {
+        AgentConnection::permission_response(self, session_id, tool_call_id, outcome)
+    }
+
+    fn question_response(
+        &self,
+        session_id: String,
+        tool_call_id: String,
+        outcome: crate::agent::types::QuestionOutcome,
+    ) -> anyhow::Result<()> {
+        AgentConnection::question_response(self, session_id, tool_call_id, outcome)
     }
 }
 

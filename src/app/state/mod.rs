@@ -146,7 +146,7 @@ pub struct App {
     pub exit_error: Option<crate::error::AppError>,
     pub session_id: Option<model::SessionId>,
     /// Agent connection handle. `None` while connecting (before bridge is ready).
-    pub conn: Option<Rc<crate::agent::client::AgentConnection>>,
+    pub conn: Option<Rc<dyn crate::agent::client::AgentBridge>>,
     /// Monotonic session authority epoch used to ignore stale async view data.
     pub session_scope_epoch: u64,
     pub current_model: Option<model::CurrentModel>,

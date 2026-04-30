@@ -1,7 +1,7 @@
 // Copyright 2025 Simon Peter Rothgang
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::agent::client::AgentConnection;
+use crate::agent::client::AgentBridge;
 use crate::agent::wire::SessionLaunchSettings;
 use crate::app::App;
 use crate::app::config::{language_input_validation_message, store};
@@ -156,7 +156,7 @@ fn log_session_request(
 
 pub(crate) fn start_new_session(
     app: &App,
-    conn: &AgentConnection,
+    conn: &dyn AgentBridge,
     reason: SessionStartReason,
 ) -> anyhow::Result<()> {
     let launch_settings = session_launch_settings_for_reason(app, reason);
@@ -166,7 +166,7 @@ pub(crate) fn start_new_session(
 
 pub(crate) fn resume_session(
     app: &App,
-    conn: &AgentConnection,
+    conn: &dyn AgentBridge,
     session_id: String,
 ) -> anyhow::Result<()> {
     let launch_settings = session_launch_settings_for_reason(app, SessionStartReason::Resume);
@@ -180,7 +180,7 @@ pub(crate) fn resume_session(
 /// synchronous errors.
 pub(crate) fn begin_resume_session(
     app: &mut App,
-    conn: &AgentConnection,
+    conn: &dyn AgentBridge,
     session_id: String,
 ) -> anyhow::Result<()> {
     app.resuming_session_id = Some(session_id.clone());

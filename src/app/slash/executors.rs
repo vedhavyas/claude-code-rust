@@ -715,7 +715,7 @@ fn handle_new_session_submit(app: &mut App, args: &[&str]) -> bool {
 
     set_command_pending(app, "Starting new session...", None);
 
-    if let Err(e) = start_new_session(app, &conn, SessionStartReason::NewSession) {
+    if let Err(e) = start_new_session(app, conn.as_ref(), SessionStartReason::NewSession) {
         let _ = app
             .event_tx
             .send(ClientEvent::SlashCommandError(format!("Failed to run /new-session: {e}")));
@@ -741,7 +741,7 @@ fn handle_resume_submit(app: &mut App, args: &[&str]) -> bool {
 
     set_command_pending(app, &format!("Resuming session {session_id}..."), None);
     let session_id = session_id.to_owned();
-    if let Err(e) = begin_resume_session(app, &conn, session_id) {
+    if let Err(e) = begin_resume_session(app, conn.as_ref(), session_id) {
         let _ = app
             .event_tx
             .send(ClientEvent::SlashCommandError(format!("Failed to run /resume: {e}")));
