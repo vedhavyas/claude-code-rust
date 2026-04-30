@@ -7,6 +7,7 @@ pub mod error_handling;
 pub mod events;
 pub mod forge_sdk_bridge;
 pub mod forge_sdk_translate;
+pub mod forge_sdk_worker;
 pub mod model;
 pub mod types;
 pub mod wire;
