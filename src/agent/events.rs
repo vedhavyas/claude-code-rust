@@ -81,7 +81,7 @@ pub enum ClientEvent {
     /// Startup Claude Code status check detected degraded/outage conditions.
     ServiceStatus { severity: ServiceStatusSeverity, message: String },
     /// /login completed via `claude auth login` -- credentials stored, ready to start a session.
-    AuthCompleted { conn: Rc<crate::agent::client::AgentConnection> },
+    AuthCompleted { conn: Rc<dyn crate::agent::client::AgentBridge> },
     /// /logout completed via `claude auth logout`.
     LogoutCompleted,
     /// Status snapshot received from bridge (account info).

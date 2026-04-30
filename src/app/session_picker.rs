@@ -74,7 +74,7 @@ fn activate_selection(app: &mut App) {
     app.status = AppStatus::CommandPending;
     app.pending_command_label = Some(format!("Resuming session {session_id}..."));
     app.pending_command_ack = None;
-    if let Err(e) = begin_resume_session(app, &conn, session_id) {
+    if let Err(e) = begin_resume_session(app, conn.as_ref(), session_id) {
         app.pending_command_label = None;
         app.pending_command_ack = None;
         app.status = AppStatus::Ready;

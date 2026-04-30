@@ -5,7 +5,7 @@
 //! and connection slot management.
 
 use crate::agent::bridge::BridgeLauncher;
-use crate::agent::client::{AgentConnection, BridgeClient};
+use crate::agent::client::{AgentBridge, AgentConnection, BridgeClient};
 use crate::agent::events::ClientEvent;
 use crate::agent::wire::{BridgeCommand, BridgeEvent, CommandEnvelope};
 use crate::error::AppError;
@@ -130,8 +130,9 @@ fn publish_connection_slot(
     conn_slot_writer: &Rc<std::cell::RefCell<Option<ConnectionSlot>>>,
     cmd_tx: &mpsc::UnboundedSender<CommandEnvelope>,
 ) {
-    *conn_slot_writer.borrow_mut() =
-        Some(ConnectionSlot { conn: Rc::new(AgentConnection::new(cmd_tx.clone())) });
+    *conn_slot_writer.borrow_mut() = Some(ConnectionSlot {
+        conn: Rc::new(AgentConnection::new(cmd_tx.clone())) as Rc<dyn AgentBridge>,
+    });
 }
 
 async fn send_initialize_command(

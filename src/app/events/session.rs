@@ -11,7 +11,7 @@ use super::super::{
 };
 use super::push_system_message_with_severity;
 use super::session_reset::{load_resume_history, reset_for_new_session};
-use crate::agent::client::AgentConnection;
+use crate::agent::client::AgentBridge;
 use crate::agent::events::ServiceStatusSeverity;
 use crate::agent::model;
 use crate::error::AppError;
@@ -204,7 +204,7 @@ pub(super) fn handle_slash_command_error_event(app: &mut App, msg: &str) {
     app.resuming_session_id = None;
 }
 
-pub(super) fn handle_auth_completed_event(app: &mut App, conn: &Rc<AgentConnection>) {
+pub(super) fn handle_auth_completed_event(app: &mut App, conn: &Rc<dyn AgentBridge>) {
     app.login_hint = None;
     app.pending_command_label = Some("Starting session...".to_owned());
     app.pending_command_ack = None;
@@ -221,7 +221,7 @@ pub(super) fn handle_auth_completed_event(app: &mut App, conn: &Rc<AgentConnecti
         outcome = "success",
     );
 
-    if let Err(e) = start_new_session(app, conn, SessionStartReason::Login) {
+    if let Err(e) = start_new_session(app, conn.as_ref(), SessionStartReason::Login) {
         tracing::error!(
             target: crate::logging::targets::APP_AUTH,
             event_name = "login_session_restart_failed",
@@ -258,7 +258,7 @@ pub(super) fn handle_logout_completed_event(app: &mut App) {
     if let Some(ref conn) = app.conn {
         app.pending_command_label = Some("Starting session...".to_owned());
         app.pending_command_ack = None;
-        if let Err(e) = start_new_session(app, conn, SessionStartReason::Logout) {
+        if let Err(e) = start_new_session(app, conn.as_ref(), SessionStartReason::Logout) {
             tracing::error!(
                 target: crate::logging::targets::APP_AUTH,
                 event_name = "logout_session_restart_failed",

@@ -119,7 +119,7 @@ fn push_user_message(app: &mut App, text: impl Into<String>) {
 fn require_connection(
     app: &mut App,
     not_connected_msg: &'static str,
-) -> Option<Rc<crate::agent::client::AgentConnection>> {
+) -> Option<Rc<dyn crate::agent::client::AgentBridge>> {
     let Some(conn) = app.conn.as_ref() else {
         push_system_message(app, not_connected_msg);
         return None;
@@ -131,7 +131,7 @@ fn require_active_session(
     app: &mut App,
     not_connected_msg: &'static str,
     no_session_msg: &'static str,
-) -> Option<(Rc<crate::agent::client::AgentConnection>, model::SessionId)> {
+) -> Option<(Rc<dyn crate::agent::client::AgentBridge>, model::SessionId)> {
     let conn = require_connection(app, not_connected_msg)?;
     let Some(session_id) = app.session_id.clone() else {
         push_system_message(app, no_session_msg);
