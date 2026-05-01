@@ -42,17 +42,26 @@ use forge_sdk::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-use crate::agent::bridge::{commands as bridge_commands, session_lifecycle, state as bridge_state};
+use crate::agent::bridge::{
+    commands as bridge_commands, session_lifecycle, state as bridge_state,
+    user_interaction as bridge_user_interaction,
+};
 use crate::agent::forge_sdk_bridge::ForgeSdkCommand;
 use crate::agent::forge_sdk_translate::translate_message;
 use crate::agent::wire::BridgeEvent;
 
-/// Pending permission/question responses keyed by `tool_use_id`.
-/// The `can_use_tool` callback inserts a oneshot here when the CLI
-/// asks; the worker drains it when the matching `PermissionResponse`
-/// or `QuestionResponse` command arrives from the TUI. Shared between
-/// the callback (set up at session spawn) and the worker dispatch.
+/// Pending permission responses keyed by `tool_use_id`. The
+/// `can_use_tool` callback parks a oneshot here when the CLI asks;
+/// dispatch drains it when the matching `PermissionResponse` arrives
+/// from the TUI.
 type PendingResponses = Arc<Mutex<HashMap<String, oneshot::Sender<PermissionDecision>>>>;
+
+/// Pending question outcomes keyed by `tool_use_id`. The
+/// `AskUserQuestion` driver in the `can_use_tool` callback parks a
+/// fresh oneshot per question, emits a `QuestionRequest`, and awaits
+/// the matching `QuestionResponse` from dispatch.
+type PendingQuestions =
+    Arc<Mutex<HashMap<String, oneshot::Sender<crate::agent::types::QuestionOutcome>>>>;
 
 /// Drive a single forge-sdk session for the lifetime of `command_rx`.
 /// Returns when the channel is closed (TUI shutting down).
@@ -61,6 +70,7 @@ pub async fn run_worker(
     event_tx: mpsc::UnboundedSender<BridgeEvent>,
 ) {
     let pending: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
+    let pending_questions: PendingQuestions = Arc::new(Mutex::new(HashMap::new()));
     let session_id_slot: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     // The bridge session holds the open-tool-call map, mode list,
     // last-seen fast mode, etc. Lives across messages + commands.
@@ -77,6 +87,7 @@ pub async fn run_worker(
             cmd,
             &event_tx,
             &pending,
+            &pending_questions,
             &session_id_slot,
             &bridge_session,
         )
@@ -115,6 +126,7 @@ async fn dispatch(
     cmd: ForgeSdkCommand,
     event_tx: &mpsc::UnboundedSender<BridgeEvent>,
     pending: &PendingResponses,
+    pending_questions: &PendingQuestions,
     session_id_slot: &Arc<Mutex<String>>,
     bridge_session: &Arc<Mutex<bridge_state::BridgeSession>>,
 ) -> anyhow::Result<()> {
@@ -126,6 +138,7 @@ async fn dispatch(
                 None,
                 event_tx,
                 pending,
+                pending_questions,
                 session_id_slot,
             );
             spawn_or_replace(state, event_tx, options, session_id_slot, bridge_session, None).await
@@ -138,6 +151,7 @@ async fn dispatch(
                 Some(&session_id),
                 event_tx,
                 pending,
+                pending_questions,
                 session_id_slot,
             );
             spawn_or_replace(
@@ -215,7 +229,7 @@ async fn dispatch(
             Ok(())
         }
         C::QuestionResponse { tool_call_id, outcome, .. } => {
-            deliver_question_response(pending, &tool_call_id, outcome);
+            deliver_question_response(pending_questions, &tool_call_id, outcome);
             Ok(())
         }
         C::RespondToElicitation {
@@ -707,34 +721,23 @@ fn build_options_with_callback(
     resume: Option<&str>,
     event_tx: &mpsc::UnboundedSender<BridgeEvent>,
     pending: &PendingResponses,
+    pending_questions: &PendingQuestions,
     session_id_slot: &Arc<Mutex<String>>,
 ) -> Options {
     let event_tx = event_tx.clone();
     let pending = Arc::clone(pending);
+    let pending_questions = Arc::clone(pending_questions);
     let session_id_slot = Arc::clone(session_id_slot);
     let callback = move |ctx: ToolPermissionContext| {
         let event_tx = event_tx.clone();
         let pending = Arc::clone(&pending);
-        let session_id = session_id_slot
-            .lock()
-            .map(|s| s.clone())
-            .unwrap_or_default();
+        let pending_questions = Arc::clone(&pending_questions);
+        let session_id = session_id_slot.lock().map(|s| s.clone()).unwrap_or_default();
         async move {
-            let (tx, rx) = oneshot::channel();
-            if let Ok(mut map) = pending.lock() {
-                map.insert(ctx.tool_use_id.clone(), tx);
-            }
-            let event = if ctx.tool_name == "AskUserQuestion" {
-                synth_question_request(&session_id, &ctx)
+            if ctx.tool_name == bridge_user_interaction::ASK_USER_QUESTION_TOOL_NAME {
+                run_ask_user_question(ctx, session_id, &event_tx, &pending_questions).await
             } else {
-                synth_permission_request(&session_id, &ctx)
-            };
-            if event_tx.send(event).is_err() {
-                return PermissionDecision::deny("event channel closed");
-            }
-            match rx.await {
-                Ok(decision) => decision,
-                Err(_) => PermissionDecision::deny("response channel closed"),
+                run_permission_request(ctx, session_id, &event_tx, &pending).await
             }
         }
     };
@@ -747,6 +750,135 @@ fn build_options_with_callback(
         b = b.resume(id);
     }
     b.build()
+}
+
+async fn run_permission_request(
+    ctx: ToolPermissionContext,
+    session_id: String,
+    event_tx: &mpsc::UnboundedSender<BridgeEvent>,
+    pending: &PendingResponses,
+) -> PermissionDecision {
+    let (tx, rx) = oneshot::channel();
+    if let Ok(mut map) = pending.lock() {
+        map.insert(ctx.tool_use_id.clone(), tx);
+    }
+    let event = synth_permission_request(&session_id, &ctx);
+    if event_tx.send(event).is_err() {
+        return PermissionDecision::deny("event channel closed");
+    }
+    match rx.await {
+        Ok(decision) => decision,
+        Err(_) => PermissionDecision::deny("response channel closed"),
+    }
+}
+
+/// Drive `AskUserQuestion` through its multi-question loop. Mirrors
+/// upstream's `requestAskUserQuestionAnswers` in
+/// `agent-sdk/src/bridge/user_interaction.ts`. Per question:
+///   1. Park a oneshot keyed by `tool_use_id`.
+///   2. Emit a `QuestionRequest` with the right `question_index` /
+///      `total_questions` so the TUI can render a paginator.
+///   3. Await the matching `QuestionResponse`.
+///   4. Resolve the selected option `label`s and accumulate them.
+///
+/// At the end, return `PermissionDecision::allow_with_input` carrying
+/// `answers: { question_text: label }` (and optional `annotations`).
+async fn run_ask_user_question(
+    ctx: ToolPermissionContext,
+    session_id: String,
+    event_tx: &mpsc::UnboundedSender<BridgeEvent>,
+    pending_questions: &PendingQuestions,
+) -> PermissionDecision {
+    use crate::agent::types::QuestionOutcome;
+
+    let prompts = bridge_user_interaction::parse_ask_user_question_prompts(&ctx.tool_input);
+    if prompts.is_empty() {
+        // Mirror upstream: no valid prompts → allow with the original
+        // input so the CLI can decide what to do.
+        return PermissionDecision::allow();
+    }
+
+    let total = prompts.len() as u64;
+    let base_tool_call = synth_question_base_tool_call(&ctx);
+    let mut answers = serde_json::Map::new();
+    let mut annotations = serde_json::Map::new();
+
+    for (index, prompt) in prompts.iter().enumerate() {
+        let request = bridge_user_interaction::build_question_request(
+            &base_tool_call,
+            prompt,
+            index as u64,
+            total,
+        );
+        let (tx, rx) = oneshot::channel();
+        if let Ok(mut map) = pending_questions.lock() {
+            map.insert(ctx.tool_use_id.clone(), tx);
+        }
+        if event_tx
+            .send(BridgeEvent::QuestionRequest {
+                session_id: session_id.clone(),
+                request: request.clone(),
+            })
+            .is_err()
+        {
+            return PermissionDecision::deny("event channel closed");
+        }
+        let Ok(outcome) = rx.await else {
+            return PermissionDecision::deny("response channel closed");
+        };
+        match outcome {
+            QuestionOutcome::Answered { selected_option_ids, annotation } => {
+                let selected: Vec<crate::agent::types::QuestionOption> = request
+                    .prompt
+                    .options
+                    .iter()
+                    .filter(|opt| selected_option_ids.iter().any(|id| id == &opt.option_id))
+                    .cloned()
+                    .collect();
+                if selected.is_empty()
+                    || (!prompt.multi_select && selected.len() != 1)
+                {
+                    return PermissionDecision::deny("Question answer was invalid");
+                }
+                let answer = selected
+                    .iter()
+                    .map(|o| o.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                answers.insert(prompt.question.clone(), serde_json::Value::String(answer));
+                if let Some(annotation) =
+                    bridge_user_interaction::derive_annotation(&selected, annotation.as_ref())
+                    && let Ok(v) = serde_json::to_value(&annotation)
+                {
+                    annotations.insert(prompt.question.clone(), v);
+                }
+            }
+            QuestionOutcome::Cancelled => {
+                return PermissionDecision::deny("Question cancelled");
+            }
+        }
+    }
+
+    let updated_input =
+        bridge_user_interaction::build_updated_input(&ctx.tool_input, answers, annotations);
+    PermissionDecision::allow_with_input(updated_input)
+}
+
+fn synth_question_base_tool_call(ctx: &ToolPermissionContext) -> crate::agent::types::ToolCall {
+    use crate::agent::types::ToolCall;
+    ToolCall {
+        tool_call_id: ctx.tool_use_id.clone(),
+        title: bridge_user_interaction::ASK_USER_QUESTION_TOOL_NAME.to_owned(),
+        kind: "ask".to_owned(),
+        status: "pending".to_owned(),
+        content: Vec::new(),
+        raw_input: Some(ctx.tool_input.clone()),
+        raw_output: None,
+        output_metadata: None,
+        task_metadata: None,
+        locations: Vec::new(),
+        meta: None,
+    }
 }
 
 fn deliver_permission_response(
@@ -784,11 +916,11 @@ fn deliver_permission_response(
 }
 
 fn deliver_question_response(
-    pending: &PendingResponses,
+    pending: &PendingQuestions,
     tool_call_id: &str,
     outcome: crate::agent::types::QuestionOutcome,
 ) {
-    let Some(tx) = take_pending(pending, tool_call_id) else {
+    let Some(tx) = pending.lock().ok().and_then(|mut m| m.remove(tool_call_id)) else {
         tracing::warn!(
             target: crate::logging::targets::APP_PERMISSION,
             tool_call_id,
@@ -796,24 +928,10 @@ fn deliver_question_response(
         );
         return;
     };
-    let decision = match outcome {
-        crate::agent::types::QuestionOutcome::Answered { selected_option_ids, .. } => {
-            // The CLI's AskUserQuestion tool reads `updatedInput.answers`.
-            // Map each selected_option_id under a deterministic key the
-            // CLI can re-correlate. The bridge.ts in agent-sdk uses the
-            // same `q{i}` pattern when the user hasn't named the
-            // questions; matching that keeps wire-compat.
-            let mut answers = serde_json::Map::new();
-            for (i, opt) in selected_option_ids.into_iter().enumerate() {
-                answers.insert(format!("q{i}"), serde_json::Value::String(opt));
-            }
-            PermissionDecision::allow_with_input(serde_json::json!({ "answers": answers }))
-        }
-        crate::agent::types::QuestionOutcome::Cancelled => {
-            PermissionDecision::deny("user cancelled question")
-        }
-    };
-    let _ = tx.send(decision);
+    // The driver in `run_ask_user_question` is awaiting the typed
+    // QuestionOutcome and will resolve labels + accumulate
+    // `answers[question_text]`. Forward the outcome verbatim.
+    let _ = tx.send(outcome);
 }
 
 fn take_pending(
@@ -849,90 +967,6 @@ fn synth_permission_request(session_id: &str, ctx: &ToolPermissionContext) -> Br
             tool_call,
             options: default_permission_options(),
             display: Some(display),
-        },
-    }
-}
-
-fn synth_question_request(session_id: &str, ctx: &ToolPermissionContext) -> BridgeEvent {
-    use crate::agent::types::{
-        QuestionOption, QuestionPrompt, QuestionRequest, ToolCall,
-    };
-    let questions: Vec<serde_json::Value> = ctx
-        .tool_input
-        .get("questions")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let total = u64::try_from(questions.len()).unwrap_or(0);
-    let prompt = questions.first().map_or_else(
-        || QuestionPrompt {
-            question: String::new(),
-            header: String::new(),
-            multi_select: false,
-            options: Vec::new(),
-        },
-        |q| QuestionPrompt {
-            question: q.get("question").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
-            header: q.get("header").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
-            multi_select: q
-                .get("multiSelect")
-                .or_else(|| q.get("multi_select"))
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false),
-            options: q
-                .get("options")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|o| {
-                            let id = o
-                                .get("option_id")
-                                .or_else(|| o.get("optionId"))
-                                .and_then(|v| v.as_str())?
-                                .to_owned();
-                            let label = o
-                                .get("label")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or(&id)
-                                .to_owned();
-                            Some(QuestionOption {
-                                option_id: id,
-                                label,
-                                description: o
-                                    .get("description")
-                                    .and_then(|v| v.as_str())
-                                    .map(str::to_owned),
-                                preview: o
-                                    .get("preview")
-                                    .and_then(|v| v.as_str())
-                                    .map(str::to_owned),
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-        },
-    );
-    let tool_call = ToolCall {
-        tool_call_id: ctx.tool_use_id.clone(),
-        title: "AskUserQuestion".to_owned(),
-        kind: "ask".to_owned(),
-        status: "pending".to_owned(),
-        content: Vec::new(),
-        raw_input: Some(ctx.tool_input.clone()),
-        raw_output: None,
-        output_metadata: None,
-        task_metadata: None,
-        locations: Vec::new(),
-        meta: None,
-    };
-    BridgeEvent::QuestionRequest {
-        session_id: session_id.to_owned(),
-        request: QuestionRequest {
-            tool_call,
-            prompt,
-            question_index: 0,
-            total_questions: total,
         },
     }
 }
@@ -1044,8 +1078,8 @@ fn clamp_percentage_to_u8(p: f64) -> u8 {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{
-        deliver_permission_response, deliver_question_response, synth_permission_request,
-        synth_question_request, take_pending, PendingResponses,
+        PendingQuestions, PendingResponses, deliver_permission_response,
+        deliver_question_response, synth_permission_request, take_pending,
     };
     use crate::agent::types::{
         ElicitationAction, PermissionOutcome, QuestionOutcome,
@@ -1119,35 +1153,57 @@ mod tests {
         assert!(pending.lock().unwrap().is_empty());
     }
 
+    fn fresh_pending_questions() -> PendingQuestions {
+        Arc::new(Mutex::new(HashMap::new()))
+    }
+
+    fn park_question(
+        pending: &PendingQuestions,
+        id: &str,
+    ) -> oneshot::Receiver<crate::agent::types::QuestionOutcome> {
+        let (tx, rx) = oneshot::channel();
+        pending.lock().unwrap().insert(id.to_owned(), tx);
+        rx
+    }
+
     #[test]
-    fn question_response_answered_drains_with_allow_and_payload() {
-        let pending = fresh_pending();
-        let rx = park(&pending, "tu_q1");
+    fn question_response_forwards_typed_outcome() {
+        let pending = fresh_pending_questions();
+        let rx = park_question(&pending, "tu_q1");
         deliver_question_response(
             &pending,
             "tu_q1",
             QuestionOutcome::Answered {
-                selected_option_ids: vec!["red".to_owned(), "blue".to_owned()],
+                selected_option_ids: vec!["question_0".to_owned(), "question_1".to_owned()],
                 annotation: None,
             },
         );
-        let decision = rx.blocking_recv().expect("oneshot resolved");
-        assert!(decision.is_allow(), "answered outcome should produce an allow");
-        // The CLI's AskUserQuestion tool reads `updatedInput.answers`.
-        // The worker maps each option to "q{i}" keys for wire-compat
-        // with the legacy Node bridge.
-        let updated = decision.updated_input().expect("answer payload present");
-        assert_eq!(updated.pointer("/answers/q0"), Some(&json!("red")));
-        assert_eq!(updated.pointer("/answers/q1"), Some(&json!("blue")));
+        // The driver in `run_ask_user_question` consumes the typed
+        // outcome and resolves answer labels itself; this function is
+        // only the routing hop.
+        let outcome = rx.blocking_recv().expect("oneshot resolved");
+        match outcome {
+            QuestionOutcome::Answered { selected_option_ids, .. } => {
+                assert_eq!(selected_option_ids, vec!["question_0", "question_1"]);
+            }
+            QuestionOutcome::Cancelled => panic!("expected answered outcome"),
+        }
     }
 
     #[test]
-    fn question_response_cancel_drains_with_deny() {
-        let pending = fresh_pending();
-        let rx = park(&pending, "tu_q2");
+    fn question_response_cancelled_forwards_typed_outcome() {
+        let pending = fresh_pending_questions();
+        let rx = park_question(&pending, "tu_q2");
         deliver_question_response(&pending, "tu_q2", QuestionOutcome::Cancelled);
-        let decision = rx.blocking_recv().expect("oneshot resolved");
-        assert!(!decision.is_allow(), "cancelled question should deny");
+        let outcome = rx.blocking_recv().expect("oneshot resolved");
+        assert!(matches!(outcome, QuestionOutcome::Cancelled));
+    }
+
+    #[test]
+    fn question_response_unknown_id_is_silent_no_op() {
+        let pending = fresh_pending_questions();
+        deliver_question_response(&pending, "missing", QuestionOutcome::Cancelled);
+        assert!(pending.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1174,60 +1230,6 @@ mod tests {
         assert_eq!(display.title.as_deref(), Some("Run shell command"));
         assert_eq!(display.display_name.as_deref(), Some("Bash"));
         assert_eq!(display.description.as_deref(), Some("Lists directory entries"));
-    }
-
-    #[test]
-    fn synth_question_request_extracts_first_prompt_and_options() {
-        let c = ctx(
-            "AskUserQuestion",
-            "tu_q3",
-            json!({
-                "questions": [
-                    {
-                        "question": "Which color?",
-                        "header": "Pick one",
-                        "multiSelect": false,
-                        "options": [
-                            { "option_id": "red", "label": "Red" },
-                            { "option_id": "blue", "label": "Blue", "description": "the cool one" },
-                        ],
-                    },
-                    {
-                        "question": "Filler so total > 1",
-                        "options": [],
-                    },
-                ],
-            }),
-        );
-        let event = synth_question_request("sess_2", &c);
-        let BridgeEvent::QuestionRequest { session_id, request } = event else {
-            panic!("expected QuestionRequest");
-        };
-        assert_eq!(session_id, "sess_2");
-        assert_eq!(request.tool_call.tool_call_id, "tu_q3");
-        assert_eq!(request.total_questions, 2);
-        assert_eq!(request.question_index, 0);
-        assert_eq!(request.prompt.question, "Which color?");
-        assert_eq!(request.prompt.header, "Pick one");
-        assert_eq!(request.prompt.options.len(), 2);
-        assert_eq!(request.prompt.options[0].option_id, "red");
-        assert_eq!(request.prompt.options[0].label, "Red");
-        assert_eq!(
-            request.prompt.options[1].description.as_deref(),
-            Some("the cool one"),
-        );
-    }
-
-    #[test]
-    fn synth_question_request_handles_empty_questions_gracefully() {
-        let c = ctx("AskUserQuestion", "tu_q4", json!({}));
-        let event = synth_question_request("sess_3", &c);
-        let BridgeEvent::QuestionRequest { request, .. } = event else {
-            panic!();
-        };
-        assert_eq!(request.total_questions, 0);
-        assert_eq!(request.prompt.question, "");
-        assert!(request.prompt.options.is_empty());
     }
 
     #[test]

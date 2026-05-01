@@ -28,3 +28,4 @@ pub mod state;
 pub mod state_parsing;
 pub mod tool_calls;
 pub mod tooling;
+pub mod user_interaction;
