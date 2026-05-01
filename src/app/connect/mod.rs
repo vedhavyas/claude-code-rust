@@ -210,6 +210,7 @@ pub fn create_app(cli: &Cli) -> App {
         turn_notice_refs: Vec::new(),
         is_compacting: false,
         account_info: None,
+        oauth_credentials: None,
         terminal_tool_calls: Vec::new(),
         terminal_tool_call_membership: HashSet::new(),
         needs_redraw: true,

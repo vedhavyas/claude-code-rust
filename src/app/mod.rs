@@ -1,7 +1,6 @@
 // Copyright 2025 Simon Peter Rothgang
 // SPDX-License-Identifier: Apache-2.0
 
-pub(crate) mod auth;
 mod cache_policy;
 pub(crate) mod clipboard_image;
 pub(crate) mod config;

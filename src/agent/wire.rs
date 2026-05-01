@@ -123,6 +123,10 @@ pub enum BridgeEvent {
         session_id: String,
         account: types::AccountInfo,
     },
+    OauthCredentialsSnapshot {
+        session_id: String,
+        credentials: Option<types::OauthCredentialsInfo>,
+    },
     ContextUsage {
         session_id: String,
         percentage: Option<u8>,
@@ -158,6 +162,7 @@ impl BridgeEvent {
             Self::Initialized { .. } => "initialized",
             Self::SessionsListed { .. } => "sessions_listed",
             Self::StatusSnapshot { .. } => "status_snapshot",
+            Self::OauthCredentialsSnapshot { .. } => "oauth_credentials_snapshot",
             Self::ContextUsage { .. } => "context_usage",
             Self::McpSnapshot { .. } => "mcp_snapshot",
         }
@@ -181,6 +186,7 @@ impl BridgeEvent {
             | Self::RuntimeReloadFailed { session_id, .. }
             | Self::SessionReplaced { session_id, .. }
             | Self::StatusSnapshot { session_id, .. }
+            | Self::OauthCredentialsSnapshot { session_id, .. }
             | Self::ContextUsage { session_id, .. }
             | Self::McpSnapshot { session_id, .. } => Some(session_id.as_str()),
             Self::AuthRequired { .. }
@@ -214,6 +220,7 @@ impl BridgeEvent {
             | Self::Initialized { .. }
             | Self::SessionsListed { .. }
             | Self::StatusSnapshot { .. }
+            | Self::OauthCredentialsSnapshot { .. }
             | Self::ContextUsage { .. }
             | Self::McpSnapshot { .. } => None,
         }

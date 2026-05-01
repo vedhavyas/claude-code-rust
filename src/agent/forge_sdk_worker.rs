@@ -267,6 +267,14 @@ async fn dispatch(
             let _ = event_tx.send(BridgeEvent::StatusSnapshot { session_id, account });
             Ok(())
         }
+        C::GetOauthCredentialsSnapshot { session_id } => {
+            let client = require_running(state, "GetOauthCredentialsSnapshot")?;
+            let credentials =
+                client.oauth_credentials().map(translate_oauth_credentials);
+            let _ =
+                event_tx.send(BridgeEvent::OauthCredentialsSnapshot { session_id, credentials });
+            Ok(())
+        }
         C::GetContextUsage { session_id } => {
             let client = require_running(state, "GetContextUsage")?;
             let usage = client.get_context_usage().await?;
@@ -1151,6 +1159,24 @@ fn translate_account_info(info: forge_sdk::AccountInfo) -> crate::agent::types::
         token_source: info.token_source,
         api_key_source: info.api_key_source,
         api_provider: info.api_provider,
+    }
+}
+
+fn translate_oauth_credentials(
+    info: forge_sdk::OauthCredentials,
+) -> crate::agent::types::OauthCredentialsInfo {
+    // SystemTime → epoch ms; round down on sub-millisecond
+    // resolution. We use ms (not seconds) so the wire shape
+    // preserves the resolution the credentials file actually
+    // carries (Anthropic's `claudeAiOauth.expiresAt` is ms).
+    let expires_at_ms = info.expires_at.and_then(|t| {
+        t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| {
+            u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+        })
+    });
+    crate::agent::types::OauthCredentialsInfo {
+        access_token: info.access_token,
+        expires_at_ms,
     }
 }
 

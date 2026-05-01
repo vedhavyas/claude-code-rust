@@ -536,6 +536,18 @@ pub struct AccountInfo {
     pub api_provider: Option<String>,
 }
 
+/// OAuth bearer credentials surfaced through the bridge after a
+/// session connect. Mirrors `forge_sdk::OauthCredentials` field-for-
+/// field; field-by-field copy at the worker boundary keeps wire and
+/// SDK sides independent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OauthCredentialsInfo {
+    pub access_token: String,
+    /// Absolute expiry as a Unix-millisecond epoch. `None` when the
+    /// credentials file did not include an `expiresAt` field.
+    pub expires_at_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum McpServerConnectionStatus {

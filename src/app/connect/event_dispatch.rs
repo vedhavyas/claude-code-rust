@@ -154,6 +154,12 @@ pub(super) fn handle_bridge_event(
         crate::agent::wire::BridgeEvent::StatusSnapshot { session_id, account } => {
             let _ = event_tx.send(ClientEvent::StatusSnapshotReceived { session_id, account });
         }
+        crate::agent::wire::BridgeEvent::OauthCredentialsSnapshot { session_id, credentials } => {
+            let _ = event_tx.send(ClientEvent::OauthCredentialsSnapshotReceived {
+                session_id,
+                credentials,
+            });
+        }
         crate::agent::wire::BridgeEvent::ContextUsage { session_id, percentage } => {
             let _ = event_tx.send(ClientEvent::ContextUsageReceived { session_id, percentage });
         }

@@ -301,6 +301,11 @@ pub struct App {
     pub is_compacting: bool,
     /// Account info from the bridge status snapshot (email, org, subscription).
     pub account_info: Option<crate::agent::types::AccountInfo>,
+    /// OAuth credentials snapshot from the bridge — populated at
+    /// session connect, refreshed after `/login` and `/logout` so
+    /// callers can ask "is the user authenticated?" without doing
+    /// their own filesystem walk to `<config_dir>/.credentials.json`.
+    pub oauth_credentials: Option<crate::agent::types::OauthCredentialsInfo>,
 
     /// Indexed terminal tool calls for per-frame terminal snapshot updates.
     /// Avoids O(n*m) scan of all messages/blocks every frame.
@@ -902,6 +907,7 @@ impl App {
             turn_notice_refs: Vec::new(),
             is_compacting: false,
             account_info: None,
+            oauth_credentials: None,
             terminal_tool_calls: Vec::new(),
             terminal_tool_call_membership: HashSet::new(),
             needs_redraw: true,

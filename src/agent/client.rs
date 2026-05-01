@@ -40,6 +40,8 @@ pub trait AgentBridge {
 
     fn get_status_snapshot(&self, session_id: String) -> anyhow::Result<()>;
 
+    fn get_oauth_credentials_snapshot(&self, session_id: String) -> anyhow::Result<()>;
+
     fn get_context_usage(&self, session_id: String) -> anyhow::Result<()>;
 
     fn reload_plugins(&self, session_id: String) -> anyhow::Result<()>;

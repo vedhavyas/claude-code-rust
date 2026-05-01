@@ -53,6 +53,7 @@ pub fn handle_client_event(app: &mut App, event: ClientEvent) {
             );
             crate::app::config::refresh_mcp_snapshot(app);
             crate::app::session_runtime::request_status_snapshot_refresh(app);
+            crate::app::session_runtime::request_oauth_credentials_snapshot_refresh(app);
             crate::app::session_runtime::request_context_usage_refresh(app);
         }
         ClientEvent::SessionsListed { sessions } => {
@@ -102,6 +103,7 @@ pub fn handle_client_event(app: &mut App, event: ClientEvent) {
             );
             crate::app::config::refresh_mcp_snapshot(app);
             crate::app::session_runtime::request_status_snapshot_refresh(app);
+            crate::app::session_runtime::request_oauth_credentials_snapshot_refresh(app);
             crate::app::session_runtime::request_context_usage_refresh(app);
         }
         ClientEvent::UpdateAvailable { latest_version, current_version } => {
@@ -151,6 +153,36 @@ pub fn handle_client_event(app: &mut App, event: ClientEvent) {
                 token_source = ?token_source,
                 api_key_source = ?api_key_source,
                 api_provider = ?api_provider,
+            );
+        }
+        ClientEvent::OauthCredentialsSnapshotReceived { session_id, credentials } => {
+            if app.session_id.as_ref().map(ToString::to_string).as_deref()
+                != Some(session_id.as_str())
+            {
+                tracing::debug!(
+                    target: crate::logging::targets::APP_AUTH,
+                    event_name = "oauth_credentials_snapshot_dropped",
+                    message = "oauth credentials snapshot dropped for a stale session",
+                    outcome = "dropped",
+                    session_id = %session_id,
+                    reason = "stale_session",
+                );
+                return;
+            }
+            let has_credentials = credentials.is_some();
+            let has_expiry = credentials
+                .as_ref()
+                .is_some_and(|info| info.expires_at_ms.is_some());
+            app.oauth_credentials = credentials;
+            app.needs_redraw = true;
+            tracing::info!(
+                target: crate::logging::targets::APP_AUTH,
+                event_name = "oauth_credentials_snapshot_applied",
+                message = "oauth credentials snapshot applied",
+                outcome = "success",
+                session_id = %session_id,
+                has_credentials,
+                has_expiry,
             );
         }
         ClientEvent::ContextUsageReceived { session_id, percentage } => {

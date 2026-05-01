@@ -1,4 +1,4 @@
-use crate::app::auth;
+use crate::agent::types::OauthCredentialsInfo;
 use crate::app::{ExtraUsage, UsageSnapshot, UsageSourceKind, UsageWindow};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use serde::Deserialize;
@@ -56,14 +56,16 @@ struct OAuthExtraUsagePayload {
     currency: Option<String>,
 }
 
-pub(super) async fn fetch_snapshot() -> Result<UsageSnapshot, OauthFetchError> {
-    let credentials = auth::load_oauth_credentials().ok_or_else(|| {
+pub(super) async fn fetch_snapshot(
+    credentials: Option<OauthCredentialsInfo>,
+) -> Result<UsageSnapshot, OauthFetchError> {
+    let credentials = credentials.ok_or_else(|| {
         OauthFetchError::Unavailable(
             "No Claude OAuth credentials found. Run /login to authenticate.".to_owned(),
         )
     })?;
 
-    if credentials.expires_at.is_some_and(|expires_at| expires_at <= SystemTime::now()) {
+    if credentials_expired(&credentials) {
         return Err(OauthFetchError::Unavailable(
             "Claude OAuth credentials expired. Run /login to refresh them.".to_owned(),
         ));
@@ -99,6 +101,17 @@ pub(super) async fn fetch_snapshot() -> Result<UsageSnapshot, OauthFetchError> {
             truncated_body_suffix(&body),
         ))),
     }
+}
+
+fn credentials_expired(credentials: &OauthCredentialsInfo) -> bool {
+    let Some(expires_at_ms) = credentials.expires_at_ms else {
+        return false;
+    };
+    let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return false;
+    };
+    let now_ms = u64::try_from(now.as_millis()).unwrap_or(u64::MAX);
+    now_ms >= expires_at_ms
 }
 
 fn oauth_headers(access_token: &str) -> Result<HeaderMap, OauthFetchError> {

@@ -76,6 +76,9 @@ pub enum ForgeSdkCommand {
     GetStatusSnapshot {
         session_id: String,
     },
+    GetOauthCredentialsSnapshot {
+        session_id: String,
+    },
     GetContextUsage {
         session_id: String,
     },
@@ -233,6 +236,10 @@ impl AgentBridge for ForgeSdkBridge {
 
     fn get_status_snapshot(&self, session_id: String) -> anyhow::Result<()> {
         self.send(ForgeSdkCommand::GetStatusSnapshot { session_id })
+    }
+
+    fn get_oauth_credentials_snapshot(&self, session_id: String) -> anyhow::Result<()> {
+        self.send(ForgeSdkCommand::GetOauthCredentialsSnapshot { session_id })
     }
 
     fn get_context_usage(&self, session_id: String) -> anyhow::Result<()> {

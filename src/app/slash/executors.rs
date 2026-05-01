@@ -418,7 +418,7 @@ fn handle_login_submit(app: &mut App, args: &[&str]) -> bool {
         outcome = "start",
     );
 
-    if crate::app::auth::has_credentials() {
+    if app.oauth_credentials.is_some() {
         push_system_message_with_severity(
             app,
             Some(SystemSeverity::Info),
@@ -467,7 +467,7 @@ fn handle_login_submit(app: &mut App, args: &[&str]) -> bool {
                     exit_code = ?status.code(),
                 );
                 if status.success() {
-                    if !crate::app::auth::has_credentials() {
+                    if forge_sdk::oauth_credentials().is_none() {
                         let _ = tx.send(ClientEvent::SlashCommandError(
                             "Login exited successfully but no credentials were saved. \
                              Try /login again or run `claude auth login` in another terminal."
@@ -514,7 +514,7 @@ fn handle_logout_submit(app: &mut App, args: &[&str]) -> bool {
         outcome = "start",
     );
 
-    if !crate::app::auth::has_credentials() {
+    if app.oauth_credentials.is_none() {
         push_system_message_with_severity(
             app,
             Some(SystemSeverity::Info),
@@ -562,7 +562,7 @@ fn handle_logout_submit(app: &mut App, args: &[&str]) -> bool {
                     exit_code = ?status.code(),
                 );
                 if status.success() {
-                    if crate::app::auth::has_credentials() {
+                    if forge_sdk::oauth_credentials().is_some() {
                         let _ = tx.send(ClientEvent::SlashCommandError(
                             "Logout exited successfully but credentials are still present. \
                              Try /logout again or run `claude auth logout` in another terminal."

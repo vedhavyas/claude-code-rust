@@ -110,6 +110,34 @@ pub(crate) fn request_status_snapshot_refresh(app: &mut App) {
     }
 }
 
+pub(crate) fn request_oauth_credentials_snapshot_refresh(app: &mut App) {
+    let Some(conn) = app.conn.as_ref() else {
+        return;
+    };
+    let Some(ref sid) = app.session_id else {
+        return;
+    };
+
+    let session_id = sid.to_string();
+    match conn.get_oauth_credentials_snapshot(session_id.clone()) {
+        Ok(()) => tracing::debug!(
+            target: crate::logging::targets::APP_AUTH,
+            event_name = "oauth_credentials_snapshot_requested",
+            message = "session oauth credentials snapshot requested",
+            outcome = "start",
+            session_id = %session_id,
+        ),
+        Err(error) => tracing::warn!(
+            target: crate::logging::targets::APP_AUTH,
+            event_name = "oauth_credentials_snapshot_request_failed",
+            message = "failed to request session oauth credentials snapshot",
+            outcome = "failure",
+            session_id = %session_id,
+            error_message = %error,
+        ),
+    }
+}
+
 pub(crate) fn apply_context_usage_snapshot(app: &mut App, percentage: Option<u8>) {
     app.session_usage.context_usage_percent = percentage;
     app.session_usage.context_usage_in_flight = false;

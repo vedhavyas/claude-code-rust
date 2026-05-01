@@ -244,6 +244,7 @@ pub(super) fn handle_logout_completed_event(app: &mut App) {
     app.bump_session_scope_epoch();
     app.clear_session_runtime_identity();
     app.account_info = None;
+    app.oauth_credentials = None;
     app.mcp = super::super::McpState::default();
     app.config.pending_session_title_change = None;
     crate::app::usage::reset_for_session_change(app);
