@@ -622,6 +622,13 @@ pub struct McpServerStatus {
     pub scope: Option<String>,
     #[serde(default)]
     pub tools: Vec<McpTool>,
+    // TODO(cleanup-phase): `sampling_configured` and `sampling_required`
+    // are pure pass-through from `forge_sdk::McpServerStatus`. They
+    // were added so the SDK-side struct could round-trip without
+    // dropping fields, but no upstream UI surface consumes them yet.
+    // Decide during cleanup whether to (a) wire them into the MCP
+    // overlay, or (b) drop them from this TUI-side struct and have
+    // the translator skip them.
     /// Whether the server has been wired with a model-sampling
     /// callback. UIs render a "sampling configured" badge.
     #[serde(default, skip_serializing_if = "Option::is_none")]

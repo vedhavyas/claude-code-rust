@@ -6,6 +6,14 @@
 //! shape on the consumer side stays identical -- `app/connect/event_dispatch.rs`
 //! is unaware which backend produced the events.
 //!
+//! TODO(cleanup-phase): once the TUI talks directly to the forge daemon
+//! (or to `forge_sdk::Client` natively) this translation layer can be
+//! deleted. The `BridgeEvent` shape was inherited from the upstream
+//! Node-bridge wire format; the daemon will prefer the SDK's own
+//! `Message` enum once the consumer side migrates. Drop together with
+//! the `BridgeEvent` enum and the `forge_sdk_event_loop` adapter in
+//! `connect/bridge_lifecycle.rs`.
+//!
 //! Variants currently translated:
 //! - `Message::Assistant` -> one `SessionUpdate` per content block
 //!   (`Text` / `Thinking` -> `AgentMessageChunk` / `AgentThoughtChunk`,
