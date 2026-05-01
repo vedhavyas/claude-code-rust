@@ -1944,6 +1944,8 @@ mod tests {
                     open_world: Some(false),
                 }),
             }],
+            sampling_configured: None,
+            sampling_required: None,
         }];
 
         terminal

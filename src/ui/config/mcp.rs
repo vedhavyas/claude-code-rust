@@ -751,6 +751,8 @@ mod tests {
                 }),
                 scope: Some("user".to_owned()),
                 tools: vec![],
+            sampling_configured: None,
+            sampling_required: None,
             },
             McpServerStatus {
                 name: "filesystem".to_owned(),
@@ -778,6 +780,8 @@ mod tests {
                         open_world: Some(false),
                     }),
                 }],
+                sampling_configured: None,
+                sampling_required: None,
             },
         ];
         app.config.mcp_selected_server_index = 1;

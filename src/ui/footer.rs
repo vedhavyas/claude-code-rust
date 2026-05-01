@@ -641,6 +641,8 @@ mod tests {
             config: None,
             scope: None,
             tools: vec![],
+            sampling_configured: None,
+            sampling_required: None,
         });
 
         assert_eq!(
@@ -665,6 +667,8 @@ mod tests {
             config: None,
             scope: None,
             tools: vec![],
+            sampling_configured: None,
+            sampling_required: None,
         });
 
         assert_eq!(footer_mcp_auth_hint(&app), None);
@@ -695,6 +699,8 @@ mod tests {
             config: None,
             scope: None,
             tools: vec![],
+            sampling_configured: None,
+            sampling_required: None,
         });
 
         assert_eq!(
