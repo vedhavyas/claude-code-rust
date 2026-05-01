@@ -903,6 +903,15 @@ async fn run_ask_user_question(
     use crate::agent::types::QuestionOutcome;
 
     let prompts = bridge_user_interaction::parse_ask_user_question_prompts(&ctx.tool_input);
+    tracing::info!(
+        target: crate::logging::targets::APP_PERMISSION,
+        event_name = "ask_user_question_received",
+        message = "AskUserQuestion can_use_tool fired",
+        outcome = "info",
+        tool_use_id = %ctx.tool_use_id,
+        prompts_parsed = prompts.len(),
+        raw_input = %ctx.tool_input,
+    );
     if prompts.is_empty() {
         // Mirror upstream: no valid prompts → allow with the original
         // input so the CLI can decide what to do.
@@ -972,6 +981,14 @@ async fn run_ask_user_question(
 
     let updated_input =
         bridge_user_interaction::build_updated_input(&ctx.tool_input, answers, annotations);
+    tracing::info!(
+        target: crate::logging::targets::APP_PERMISSION,
+        event_name = "ask_user_question_resolved",
+        message = "AskUserQuestion answers ready, returning PermissionDecision::allow_with_input",
+        outcome = "success",
+        tool_use_id = %ctx.tool_use_id,
+        updated_input = %updated_input,
+    );
     PermissionDecision::allow_with_input(updated_input)
 }
 
