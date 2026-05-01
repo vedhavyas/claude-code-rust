@@ -131,10 +131,18 @@ pub(super) fn render_execute_with_borders(
     top.push(Span::styled(format!("{top_fill}\u{256E}"), border));
     out.push(Line::from(top));
 
-    // Content lines with left border prefix
+    // Content lines with left border prefix. Truncate each line to
+    // fit inside the card so long bash commands / outputs don't
+    // overflow the right border. The visible budget is the inner box
+    // width minus the leading "│ " prefix and one trailing fill cell.
+    let body_budget = (width as usize)
+        .saturating_sub(2 /* "  " left margin */)
+        .saturating_sub(2 /* "│ " left border + space */)
+        .saturating_sub(1 /* trailing safety cell */);
     for line in content {
+        let truncated = truncate_spans_to_width(line.spans.clone(), body_budget);
         let mut spans = vec![Span::styled("  \u{2502} ", border)];
-        spans.extend(line.spans.iter().cloned());
+        spans.extend(truncated);
         out.push(Line::from(spans));
     }
 
