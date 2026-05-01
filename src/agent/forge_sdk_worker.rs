@@ -162,12 +162,52 @@ async fn dispatch(
         C::SetModel { session_id: _, model } => {
             let client = require_running(state, "SetModel")?;
             client.set_model(Some(model.as_str())).await?;
+            // Follow-up emits — mirror upstream's emitCurrentModelUpdate +
+            // emitModeStateUpdate so the bottom-bar model name and the
+            // mode chip refresh immediately rather than waiting for the
+            // next system/init.
+            if let Ok(mut bs) = bridge_session.lock() {
+                bs.requested_model_id = Some(model.clone());
+                let mut buf: Vec<BridgeEvent> = Vec::new();
+                let _ = session_lifecycle::refresh_current_model(&mut bs, true, &mut buf);
+                if let Some(mode) = bs.mode {
+                    bridge_commands::refresh_supported_modes_for_session(&mut bs);
+                    let mode_state = bridge_commands::build_mode_state(&bs, mode);
+                    buf.push(BridgeEvent::SessionUpdate {
+                        session_id: bs.session_id.clone(),
+                        update: crate::agent::types::SessionUpdate::ModeStateUpdate { mode: mode_state },
+                    });
+                }
+                for ev in buf {
+                    let _ = event_tx.send(ev);
+                }
+            }
             Ok(())
         }
         C::SetMode { session_id: _, mode } => {
             let client = require_running(state, "SetMode")?;
-            let mode = parse_permission_mode(&mode)?;
-            client.set_permission_mode(mode).await?;
+            let parsed = parse_permission_mode(&mode)?;
+            client.set_permission_mode(parsed).await?;
+            // Follow-up: emit CurrentModeUpdate + ModeStateUpdate.
+            if let Ok(mut bs) = bridge_session.lock()
+                && let Some(bridge_mode) = bridge_state::PermissionMode::from_wire(&mode)
+            {
+                bs.mode = Some(bridge_mode);
+                bridge_commands::refresh_supported_modes_for_session(&mut bs);
+                let mode_state = bridge_commands::build_mode_state(&bs, bridge_mode);
+                let session_id = bs.session_id.clone();
+                drop(bs);
+                let _ = event_tx.send(BridgeEvent::SessionUpdate {
+                    session_id: session_id.clone(),
+                    update: crate::agent::types::SessionUpdate::CurrentModeUpdate {
+                        current_mode_id: bridge_mode.as_wire().to_owned(),
+                    },
+                });
+                let _ = event_tx.send(BridgeEvent::SessionUpdate {
+                    session_id,
+                    update: crate::agent::types::SessionUpdate::ModeStateUpdate { mode: mode_state },
+                });
+            }
             Ok(())
         }
         C::PermissionResponse { tool_call_id, outcome, .. } => {
@@ -211,9 +251,23 @@ async fn dispatch(
             });
             Ok(())
         }
-        C::ReloadPlugins { session_id: _ } => {
+        C::ReloadPlugins { session_id } => {
             let client = require_running(state, "ReloadPlugins")?;
-            let _ = client.reload_plugins().await?;
+            match client.reload_plugins().await {
+                Ok(_) => {
+                    // Mirror upstream: emit RuntimeReloadCompleted +
+                    // refresh slash-command catalogue if reload_plugins
+                    // returned a fresh `commands` array.
+                    let _ = event_tx
+                        .send(BridgeEvent::RuntimeReloadCompleted { session_id });
+                }
+                Err(e) => {
+                    let _ = event_tx.send(BridgeEvent::RuntimeReloadFailed {
+                        session_id,
+                        message: format!("reload_plugins failed: {e}"),
+                    });
+                }
+            }
             Ok(())
         }
         C::GetMcpSnapshot { session_id } => {
@@ -227,36 +281,112 @@ async fn dispatch(
             let _ = event_tx.send(BridgeEvent::McpSnapshot { session_id, servers, error: None });
             Ok(())
         }
-        C::ReconnectMcpServer { server_name, .. } => {
+        C::ReconnectMcpServer { session_id, server_name } => {
             let client = require_running(state, "ReconnectMcpServer")?;
-            client.mcp_reconnect(&server_name).await?;
+            if let Err(e) = client.mcp_reconnect(&server_name).await {
+                let _ = event_tx.send(BridgeEvent::McpOperationError {
+                    session_id,
+                    error: crate::agent::types::McpOperationError {
+                        operation: "reconnect".to_owned(),
+                        server_name: Some(server_name),
+                        message: format!("{e}"),
+                    },
+                });
+            }
             Ok(())
         }
-        C::ToggleMcpServer { server_name, enabled, .. } => {
+        C::ToggleMcpServer { session_id, server_name, enabled } => {
             let client = require_running(state, "ToggleMcpServer")?;
-            client.mcp_toggle(&server_name, enabled).await?;
+            if let Err(e) = client.mcp_toggle(&server_name, enabled).await {
+                let _ = event_tx.send(BridgeEvent::McpOperationError {
+                    session_id,
+                    error: crate::agent::types::McpOperationError {
+                        operation: "toggle".to_owned(),
+                        server_name: Some(server_name),
+                        message: format!("{e}"),
+                    },
+                });
+            }
             Ok(())
         }
-        C::SetMcpServers { servers, .. } => {
+        C::SetMcpServers { session_id, servers } => {
             let client = require_running(state, "SetMcpServers")?;
-            client.mcp_set_servers(serde_json::to_value(servers)?).await?;
+            if let Err(e) = client.mcp_set_servers(serde_json::to_value(servers)?).await {
+                let _ = event_tx.send(BridgeEvent::McpOperationError {
+                    session_id,
+                    error: crate::agent::types::McpOperationError {
+                        operation: "set_servers".to_owned(),
+                        server_name: None,
+                        message: format!("{e}"),
+                    },
+                });
+            }
             Ok(())
         }
-        C::AuthenticateMcpServer { server_name, .. } => {
+        C::AuthenticateMcpServer { session_id, server_name } => {
             let client = require_running(state, "AuthenticateMcpServer")?;
-            let _ = client.mcp_authenticate(&server_name).await?;
+            match client.mcp_authenticate(&server_name).await {
+                Ok(response) => {
+                    // Walk the response Value for the redirect_url /
+                    // auth_url key upstream's bridge looked at. When
+                    // present, surface as McpAuthRedirect so the TUI
+                    // can pop the browser hint.
+                    let url = response
+                        .get("redirect_url")
+                        .or_else(|| response.get("authUrl"))
+                        .or_else(|| response.get("auth_url"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned);
+                    if let Some(auth_url) = url {
+                        let _ = event_tx.send(BridgeEvent::McpAuthRedirect {
+                            session_id,
+                            redirect: crate::agent::types::McpAuthRedirect {
+                                server_name,
+                                auth_url,
+                                requires_user_action: true,
+                            },
+                        });
+                    }
+                }
+                Err(e) => {
+                    let _ = event_tx.send(BridgeEvent::McpOperationError {
+                        session_id,
+                        error: crate::agent::types::McpOperationError {
+                            operation: "authenticate".to_owned(),
+                            server_name: Some(server_name),
+                            message: format!("{e}"),
+                        },
+                    });
+                }
+            }
             Ok(())
         }
-        C::ClearMcpAuth { server_name, .. } => {
+        C::ClearMcpAuth { session_id, server_name } => {
             let client = require_running(state, "ClearMcpAuth")?;
-            client.mcp_clear_auth(&server_name).await?;
+            if let Err(e) = client.mcp_clear_auth(&server_name).await {
+                let _ = event_tx.send(BridgeEvent::McpOperationError {
+                    session_id,
+                    error: crate::agent::types::McpOperationError {
+                        operation: "clear_auth".to_owned(),
+                        server_name: Some(server_name),
+                        message: format!("{e}"),
+                    },
+                });
+            }
             Ok(())
         }
-        C::SubmitMcpOauthCallbackUrl { server_name, callback_url, .. } => {
+        C::SubmitMcpOauthCallbackUrl { session_id, server_name, callback_url } => {
             let client = require_running(state, "SubmitMcpOauthCallbackUrl")?;
-            client
-                .mcp_oauth_callback_url(&server_name, &callback_url)
-                .await?;
+            if let Err(e) = client.mcp_oauth_callback_url(&server_name, &callback_url).await {
+                let _ = event_tx.send(BridgeEvent::McpOperationError {
+                    session_id,
+                    error: crate::agent::types::McpOperationError {
+                        operation: "oauth_callback".to_owned(),
+                        server_name: Some(server_name),
+                        message: format!("{e}"),
+                    },
+                });
+            }
             Ok(())
         }
         C::GenerateSessionTitle { session_id: _, description } => {
