@@ -641,11 +641,17 @@ impl AvailableAgent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum EffortLevel {
+    #[serde(rename = "low")]
     Low,
+    #[serde(rename = "medium")]
     Medium,
+    #[serde(rename = "high")]
     High,
+    #[serde(rename = "xhigh")]
+    Xhigh,
+    #[serde(rename = "max")]
+    Max,
 }
 
 impl EffortLevel {
@@ -655,6 +661,8 @@ impl EffortLevel {
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
         }
     }
 
@@ -664,6 +672,8 @@ impl EffortLevel {
             Self::Low => "Low",
             Self::Medium => "Medium",
             Self::High => "High",
+            Self::Xhigh => "Extra High",
+            Self::Max => "Max",
         }
     }
 
@@ -673,6 +683,8 @@ impl EffortLevel {
             Self::Low => "Fastest responses",
             Self::Medium => "Balanced speed and depth",
             Self::High => "Deeper reasoning",
+            Self::Xhigh => "Extra-high reasoning",
+            Self::Max => "Maximum reasoning",
         }
     }
 
@@ -682,6 +694,8 @@ impl EffortLevel {
             "low" => Some(Self::Low),
             "medium" => Some(Self::Medium),
             "high" => Some(Self::High),
+            "xhigh" | "extra_high" => Some(Self::Xhigh),
+            "max" => Some(Self::Max),
             _ => None,
         }
     }

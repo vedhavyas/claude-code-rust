@@ -188,6 +188,8 @@ const fn footer_effort_label(effort: model::EffortLevel) -> &'static str {
         model::EffortLevel::Low => "Low",
         model::EffortLevel::Medium => "Med",
         model::EffortLevel::High => "High",
+        model::EffortLevel::Xhigh => "Xhi",
+        model::EffortLevel::Max => "Max",
     }
 }
 

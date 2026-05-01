@@ -104,6 +104,8 @@ pub(super) fn map_available_models(
                             types::EffortLevel::Low => model::EffortLevel::Low,
                             types::EffortLevel::Medium => model::EffortLevel::Medium,
                             types::EffortLevel::High => model::EffortLevel::High,
+                            types::EffortLevel::Xhigh => model::EffortLevel::Xhigh,
+                            types::EffortLevel::Max => model::EffortLevel::Max,
                         })
                         .collect(),
                 );
@@ -128,6 +130,8 @@ pub(super) fn convert_current_model(current_model: types::CurrentModel) -> model
                 types::EffortLevel::Low => model::EffortLevel::Low,
                 types::EffortLevel::Medium => model::EffortLevel::Medium,
                 types::EffortLevel::High => model::EffortLevel::High,
+                types::EffortLevel::Xhigh => model::EffortLevel::Xhigh,
+                types::EffortLevel::Max => model::EffortLevel::Max,
             })
             .collect(),
     )

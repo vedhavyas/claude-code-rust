@@ -33,11 +33,17 @@ pub struct AvailableAgent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum EffortLevel {
+    #[serde(rename = "low")]
     Low,
+    #[serde(rename = "medium")]
     Medium,
+    #[serde(rename = "high")]
     High,
+    #[serde(rename = "xhigh")]
+    Xhigh,
+    #[serde(rename = "max")]
+    Max,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

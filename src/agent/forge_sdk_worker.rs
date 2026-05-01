@@ -818,6 +818,7 @@ fn build_options_with_callback(
     // and shows the wrong chip in the footer.
     let mut applied_mode: Option<&'static str> = None;
     let mut applied_model: Option<String> = None;
+    let mut applied_effort: Option<String> = None;
     let settings_present = launch_settings.settings.is_some();
     if let Some(settings_value) = launch_settings.settings.as_ref()
         && let Some(settings_record) = settings_value.as_object()
@@ -835,6 +836,17 @@ fn build_options_with_callback(
             b = b.model(model);
             applied_model = Some(model.to_owned());
         }
+        // `effortLevel` from settings.json. The CLI accepts
+        // `low | medium | high | xhigh | max` per `claude --help`.
+        // forge-sdk's typed enum only carries Low/Medium/High/Max;
+        // xhigh has to go through the `extra_arg` escape hatch (which
+        // emits `--effort xhigh` verbatim).
+        if let Some(effort) = settings_record.get("effortLevel").and_then(serde_json::Value::as_str)
+            && !effort.trim().is_empty()
+        {
+            applied_effort = Some(effort.to_owned());
+            b = b.extra_arg("effort", Some(effort.to_owned()));
+        }
     }
     tracing::info!(
         target: crate::logging::targets::BRIDGE_LIFECYCLE,
@@ -844,6 +856,7 @@ fn build_options_with_callback(
         settings_present,
         applied_permission_mode = applied_mode.unwrap_or("(none)"),
         applied_model = applied_model.as_deref().unwrap_or("(none)"),
+        applied_effort = applied_effort.as_deref().unwrap_or("(none)"),
         cwd_present = !cwd.is_empty(),
         resume_present = resume.is_some(),
     );
