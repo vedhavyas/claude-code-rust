@@ -30,15 +30,26 @@
 //! (typed `account_info`, permission ctx display fields, MCP sampling
 //! status, elicitation) are flagged inline.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
-use forge_sdk::{Client, Options, OptionsBuilder, PermissionMode};
-use tokio::sync::mpsc;
+use forge_sdk::{
+    Client, Options, OptionsBuilder, PermissionDecision, PermissionMode, ToolPermissionContext,
+};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::agent::forge_sdk_bridge::ForgeSdkCommand;
 use crate::agent::forge_sdk_translate::translate_message;
 use crate::agent::types::CurrentModel;
 use crate::agent::wire::BridgeEvent;
+
+/// Pending permission/question responses keyed by `tool_use_id`.
+/// The `can_use_tool` callback inserts a oneshot here when the CLI
+/// asks; the worker drains it when the matching `PermissionResponse`
+/// or `QuestionResponse` command arrives from the TUI. Shared between
+/// the callback (set up at session spawn) and the worker dispatch.
+type PendingResponses = Arc<Mutex<HashMap<String, oneshot::Sender<PermissionDecision>>>>;
 
 /// Drive a single forge-sdk session for the lifetime of `command_rx`.
 /// Returns when the channel is closed (TUI shutting down).
@@ -46,10 +57,20 @@ pub async fn run_worker(
     mut command_rx: mpsc::UnboundedReceiver<ForgeSdkCommand>,
     event_tx: mpsc::UnboundedSender<BridgeEvent>,
 ) {
+    let pending: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
+    let session_id_slot: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     let mut state: WorkerState = WorkerState::Waiting;
 
     while let Some(cmd) = command_rx.recv().await {
-        if let Err(err) = dispatch(&mut state, cmd, &event_tx).await {
+        if let Err(err) = dispatch(
+            &mut state,
+            cmd,
+            &event_tx,
+            &pending,
+            &session_id_slot,
+        )
+        .await
+        {
             tracing::warn!(
                 target: crate::logging::targets::BRIDGE_LIFECYCLE,
                 error = %err,
@@ -77,20 +98,37 @@ enum WorkerState {
     },
 }
 
+#[allow(clippy::too_many_lines)]
 async fn dispatch(
     state: &mut WorkerState,
     cmd: ForgeSdkCommand,
     event_tx: &mpsc::UnboundedSender<BridgeEvent>,
+    pending: &PendingResponses,
+    session_id_slot: &Arc<Mutex<String>>,
 ) -> anyhow::Result<()> {
     use ForgeSdkCommand as C;
     match cmd {
         C::NewSession { cwd, launch_settings: _ } => {
-            spawn_or_replace(state, event_tx, build_options(&cwd, None)).await
+            let options = build_options_with_callback(
+                &cwd,
+                None,
+                event_tx,
+                pending,
+                session_id_slot,
+            );
+            spawn_or_replace(state, event_tx, options, session_id_slot).await
         }
         C::ResumeSession { session_id, launch_settings: _ } => {
             // Resume by passing the prior session id to the CLI. The
             // CLI itself decides what cwd to use; we don't override.
-            spawn_or_replace(state, event_tx, build_options("", Some(&session_id))).await
+            let options = build_options_with_callback(
+                "",
+                Some(&session_id),
+                event_tx,
+                pending,
+                session_id_slot,
+            );
+            spawn_or_replace(state, event_tx, options, session_id_slot).await
         }
         C::Prompt { session_id: _, chunks } => {
             let client = require_running(state, "Prompt")?;
@@ -112,15 +150,12 @@ async fn dispatch(
             client.set_permission_mode(mode).await?;
             Ok(())
         }
-        // ----- TODO: real implementations land in follow-up commits.
-        C::PermissionResponse { .. } | C::QuestionResponse { .. } => {
-            // The can_use_tool callback owns the response side; the
-            // TUI returns answers through a side-channel set up at
-            // session spawn. Wired in the next commit.
-            tracing::warn!(
-                target: crate::logging::targets::APP_PERMISSION,
-                "forge_sdk_worker: permission/question response path not yet wired",
-            );
+        C::PermissionResponse { tool_call_id, outcome, .. } => {
+            deliver_permission_response(pending, &tool_call_id, outcome);
+            Ok(())
+        }
+        C::QuestionResponse { tool_call_id, outcome, .. } => {
+            deliver_question_response(pending, &tool_call_id, outcome);
             Ok(())
         }
         C::RespondToElicitation { .. } => {
@@ -211,6 +246,7 @@ async fn spawn_or_replace(
     state: &mut WorkerState,
     event_tx: &mpsc::UnboundedSender<BridgeEvent>,
     options: Options,
+    session_id_slot: &Arc<Mutex<String>>,
 ) -> anyhow::Result<()> {
     // If we already have a client, drop it first so the existing
     // subprocess can shut down cleanly.
@@ -220,6 +256,9 @@ async fn spawn_or_replace(
 
     let client = Client::spawn(options).await?;
     let session_id = client.session_id();
+    if let Ok(mut slot) = session_id_slot.lock() {
+        slot.clone_from(&session_id);
+    }
 
     // Spawn reader subtask. The Client is Arc-backed so we clone for
     // the reader; the worker keeps its own handle for command dispatch.
@@ -311,16 +350,6 @@ async fn send_prompt(
     Ok(())
 }
 
-fn build_options(cwd: &str, resume: Option<&str>) -> Options {
-    let mut b = OptionsBuilder::new();
-    if !cwd.is_empty() {
-        b = b.cwd(PathBuf::from(cwd));
-    }
-    if let Some(id) = resume {
-        b = b.resume(id);
-    }
-    b.build()
-}
 
 fn parse_permission_mode(mode: &str) -> anyhow::Result<PermissionMode> {
     match mode {
@@ -335,6 +364,278 @@ fn parse_permission_mode(mode: &str) -> anyhow::Result<PermissionMode> {
         )),
     }
 }
+
+// ----------------------------------------------------------------------------
+// Permission / question round-trip
+// ----------------------------------------------------------------------------
+
+/// Build forge-sdk `Options` with the `can_use_tool` callback wired
+/// up. The callback bridges forge-sdk's permission flow to the TUI's
+/// `BridgeEvent` channel: each request is parked on the shared
+/// `pending` map keyed by `tool_use_id`; the matching
+/// `PermissionResponse` / `QuestionResponse` command on the worker's
+/// inbound channel drains the oneshot to release the callback.
+fn build_options_with_callback(
+    cwd: &str,
+    resume: Option<&str>,
+    event_tx: &mpsc::UnboundedSender<BridgeEvent>,
+    pending: &PendingResponses,
+    session_id_slot: &Arc<Mutex<String>>,
+) -> Options {
+    let event_tx = event_tx.clone();
+    let pending = Arc::clone(pending);
+    let session_id_slot = Arc::clone(session_id_slot);
+    let callback = move |ctx: ToolPermissionContext| {
+        let event_tx = event_tx.clone();
+        let pending = Arc::clone(&pending);
+        let session_id = session_id_slot
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default();
+        async move {
+            let (tx, rx) = oneshot::channel();
+            if let Ok(mut map) = pending.lock() {
+                map.insert(ctx.tool_use_id.clone(), tx);
+            }
+            let event = if ctx.tool_name == "AskUserQuestion" {
+                synth_question_request(&session_id, &ctx)
+            } else {
+                synth_permission_request(&session_id, &ctx)
+            };
+            if event_tx.send(event).is_err() {
+                return PermissionDecision::deny("event channel closed");
+            }
+            match rx.await {
+                Ok(decision) => decision,
+                Err(_) => PermissionDecision::deny("response channel closed"),
+            }
+        }
+    };
+
+    let mut b = OptionsBuilder::new().can_use_tool(callback);
+    if !cwd.is_empty() {
+        b = b.cwd(PathBuf::from(cwd));
+    }
+    if let Some(id) = resume {
+        b = b.resume(id);
+    }
+    b.build()
+}
+
+fn deliver_permission_response(
+    pending: &PendingResponses,
+    tool_call_id: &str,
+    outcome: crate::agent::types::PermissionOutcome,
+) {
+    let Some(tx) = take_pending(pending, tool_call_id) else {
+        tracing::warn!(
+            target: crate::logging::targets::APP_PERMISSION,
+            tool_call_id,
+            "forge_sdk_worker: PermissionResponse for unknown tool_call_id (already drained?)",
+        );
+        return;
+    };
+    let decision = match outcome {
+        crate::agent::types::PermissionOutcome::Selected { option_id } => {
+            // Selected option ids encode the user choice. The CLI
+            // expects allow/deny semantics on the wire; we map by
+            // suffix conventions ("deny" -> deny; anything else ->
+            // allow). UIs that surface custom option_ids stay
+            // compatible because the SDK only cares about the
+            // resulting allow/deny decision.
+            if option_id.eq_ignore_ascii_case("deny") || option_id.eq_ignore_ascii_case("reject") {
+                PermissionDecision::deny(format!("user denied: {option_id}"))
+            } else {
+                PermissionDecision::allow()
+            }
+        }
+        crate::agent::types::PermissionOutcome::Cancelled => {
+            PermissionDecision::deny("user cancelled")
+        }
+    };
+    let _ = tx.send(decision);
+}
+
+fn deliver_question_response(
+    pending: &PendingResponses,
+    tool_call_id: &str,
+    outcome: crate::agent::types::QuestionOutcome,
+) {
+    let Some(tx) = take_pending(pending, tool_call_id) else {
+        tracing::warn!(
+            target: crate::logging::targets::APP_PERMISSION,
+            tool_call_id,
+            "forge_sdk_worker: QuestionResponse for unknown tool_call_id",
+        );
+        return;
+    };
+    let decision = match outcome {
+        crate::agent::types::QuestionOutcome::Answered { selected_option_ids, .. } => {
+            // The CLI's AskUserQuestion tool reads `updatedInput.answers`.
+            // Map each selected_option_id under a deterministic key the
+            // CLI can re-correlate. The bridge.ts in agent-sdk uses the
+            // same `q{i}` pattern when the user hasn't named the
+            // questions; matching that keeps wire-compat.
+            let mut answers = serde_json::Map::new();
+            for (i, opt) in selected_option_ids.into_iter().enumerate() {
+                answers.insert(format!("q{i}"), serde_json::Value::String(opt));
+            }
+            PermissionDecision::allow_with_input(serde_json::json!({ "answers": answers }))
+        }
+        crate::agent::types::QuestionOutcome::Cancelled => {
+            PermissionDecision::deny("user cancelled question")
+        }
+    };
+    let _ = tx.send(decision);
+}
+
+fn take_pending(
+    pending: &PendingResponses,
+    tool_call_id: &str,
+) -> Option<oneshot::Sender<PermissionDecision>> {
+    pending.lock().ok()?.remove(tool_call_id)
+}
+
+fn synth_permission_request(session_id: &str, ctx: &ToolPermissionContext) -> BridgeEvent {
+    use crate::agent::types::{PermissionDisplay, PermissionRequest, ToolCall};
+    let tool_call = ToolCall {
+        tool_call_id: ctx.tool_use_id.clone(),
+        title: ctx.tool_name.clone(),
+        kind: "execute".to_owned(),
+        status: "pending".to_owned(),
+        content: Vec::new(),
+        raw_input: Some(ctx.tool_input.clone()),
+        raw_output: None,
+        output_metadata: None,
+        task_metadata: None,
+        locations: Vec::new(),
+        meta: None,
+    };
+    let display = PermissionDisplay {
+        title: ctx.title.clone(),
+        display_name: ctx.display_name.clone(),
+        description: ctx.description.clone(),
+    };
+    BridgeEvent::PermissionRequest {
+        session_id: session_id.to_owned(),
+        request: PermissionRequest {
+            tool_call,
+            options: default_permission_options(),
+            display: Some(display),
+        },
+    }
+}
+
+fn synth_question_request(session_id: &str, ctx: &ToolPermissionContext) -> BridgeEvent {
+    use crate::agent::types::{
+        QuestionOption, QuestionPrompt, QuestionRequest, ToolCall,
+    };
+    let questions: Vec<serde_json::Value> = ctx
+        .tool_input
+        .get("questions")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let total = u64::try_from(questions.len()).unwrap_or(0);
+    let prompt = questions.first().map_or_else(
+        || QuestionPrompt {
+            question: String::new(),
+            header: String::new(),
+            multi_select: false,
+            options: Vec::new(),
+        },
+        |q| QuestionPrompt {
+            question: q.get("question").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
+            header: q.get("header").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
+            multi_select: q
+                .get("multiSelect")
+                .or_else(|| q.get("multi_select"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            options: q
+                .get("options")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|o| {
+                            let id = o
+                                .get("option_id")
+                                .or_else(|| o.get("optionId"))
+                                .and_then(|v| v.as_str())?
+                                .to_owned();
+                            let label = o
+                                .get("label")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(&id)
+                                .to_owned();
+                            Some(QuestionOption {
+                                option_id: id,
+                                label,
+                                description: o
+                                    .get("description")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_owned),
+                                preview: o
+                                    .get("preview")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_owned),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        },
+    );
+    let tool_call = ToolCall {
+        tool_call_id: ctx.tool_use_id.clone(),
+        title: "AskUserQuestion".to_owned(),
+        kind: "ask".to_owned(),
+        status: "pending".to_owned(),
+        content: Vec::new(),
+        raw_input: Some(ctx.tool_input.clone()),
+        raw_output: None,
+        output_metadata: None,
+        task_metadata: None,
+        locations: Vec::new(),
+        meta: None,
+    };
+    BridgeEvent::QuestionRequest {
+        session_id: session_id.to_owned(),
+        request: QuestionRequest {
+            tool_call,
+            prompt,
+            question_index: 0,
+            total_questions: total,
+        },
+    }
+}
+
+fn default_permission_options() -> Vec<crate::agent::types::PermissionOption> {
+    vec![
+        crate::agent::types::PermissionOption {
+            option_id: "allow_once".to_owned(),
+            name: "Allow once".to_owned(),
+            description: None,
+            kind: "allow_once".to_owned(),
+        },
+        crate::agent::types::PermissionOption {
+            option_id: "allow_always".to_owned(),
+            name: "Allow always".to_owned(),
+            description: None,
+            kind: "allow_always".to_owned(),
+        },
+        crate::agent::types::PermissionOption {
+            option_id: "deny".to_owned(),
+            name: "Deny".to_owned(),
+            description: None,
+            kind: "reject_once".to_owned(),
+        },
+    ]
+}
+
+// ----------------------------------------------------------------------------
+// Other translators
+// ----------------------------------------------------------------------------
 
 fn translate_account_info(info: forge_sdk::AccountInfo) -> crate::agent::types::AccountInfo {
     // forge_sdk::AccountInfo and crate::agent::types::AccountInfo
