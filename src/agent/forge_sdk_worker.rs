@@ -315,7 +315,7 @@ async fn spawn_or_replace(
     let init_data = client.initial_session_data().cloned();
     let available_models = build_available_models(server_info.as_ref());
     let current_model = build_current_model(init_data.as_ref(), &available_models);
-    let mode = build_mode_state(init_data.as_ref());
+    let mode = build_mode_state(init_data.as_ref(), &current_model);
 
     // History is loaded from the on-disk JSONL when resuming. The CLI
     // emits new turns as fresh stream-json frames, so we only need to
@@ -431,7 +431,7 @@ fn build_available_models(
 /// init data carries the resolved model id under `model`; we look it
 /// up in `available_models` for the catalog metadata. When the lookup
 /// misses we still emit a minimal `CurrentModel` so the bottom bar at
-/// least shows the resolved id.
+/// least shows the resolved id. Mirrors upstream's `resolveCurrentModel`.
 fn build_current_model(
     init_data: Option<&serde_json::Value>,
     available_models: &[crate::agent::types::AvailableModel],
@@ -444,27 +444,32 @@ fn build_current_model(
         .unwrap_or_default()
         .to_owned();
     let catalog = available_models.iter().find(|m| m.id == resolved_id);
-    let display_name = catalog.map_or_else(|| resolved_id.clone(), |m| m.display_name.clone());
+    let display_name_short = catalog.map_or_else(
+        || short_display_name_for_model_id(&resolved_id),
+        |m| m.display_name.clone(),
+    );
+    let display_name_long = humanize_model_id(&resolved_id);
     CurrentModel {
         requested_id: None,
-        resolved_id,
-        display_name_short: display_name.clone(),
-        display_name_long: display_name,
+        resolved_id: resolved_id.clone(),
+        display_name_short,
+        display_name_long,
         catalog_id: catalog.map(|m| m.id.clone()),
         supports_effort: catalog.is_some_and(|m| m.supports_effort),
         supported_effort_levels: catalog.map_or_else(Vec::new, |m| m.supported_effort_levels.clone()),
         supports_fast_mode: catalog.and_then(|m| m.supports_fast_mode),
         supports_auto_mode: catalog.and_then(|m| m.supports_auto_mode),
         supports_adaptive_thinking: catalog.and_then(|m| m.supports_adaptive_thinking),
-        is_authoritative: catalog.is_some(),
+        is_authoritative: !resolved_id.trim().is_empty(),
     }
 }
 
-/// Build a `ModeState` from the cached system/init payload. The CLI's
-/// `permissionMode` field maps to `current_mode_id`. When missing we
-/// return `None` so the bottom bar's mode chip stays neutral.
+/// Build a `ModeState` from the cached system/init payload. Mirrors
+/// upstream's `BASE_SUPPORTED_MODE_IDS` + `currentModelSupportsAutoMode`
+/// + `supportsBypassPermissionsMode` selection.
 fn build_mode_state(
     init_data: Option<&serde_json::Value>,
+    current_model: &crate::agent::types::CurrentModel,
 ) -> Option<crate::agent::types::ModeState> {
     use crate::agent::types::{ModeInfo, ModeState};
 
@@ -472,14 +477,32 @@ fn build_mode_state(
         .and_then(|v| v.get("permissionMode"))
         .and_then(|v| v.as_str())?
         .to_owned();
-    let display = mode_display_name(&mode_id);
+
+    // Base set: default / acceptEdits / plan / dontAsk. Add `auto`
+    // when the current model advertises it; add `bypassPermissions`
+    // when system/init says the runtime allows it.
+    let mut ids: Vec<&str> = vec!["default", "acceptEdits", "plan", "dontAsk"];
+    if current_model.supports_auto_mode == Some(true) {
+        ids.push("auto");
+    }
+    let supports_bypass = init_data
+        .and_then(|v| v.get("supportsBypassPermissionsMode"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if supports_bypass {
+        ids.push("bypassPermissions");
+    }
+    if !ids.iter().any(|id| *id == mode_id) {
+        ids.push(mode_id.as_str());
+    }
+
     Some(ModeState {
         current_mode_id: mode_id.clone(),
-        current_mode_name: display.to_owned(),
-        available_modes: ["default", "acceptEdits", "plan", "bypassPermissions"]
-            .iter()
+        current_mode_name: mode_display_name(&mode_id).to_owned(),
+        available_modes: ids
+            .into_iter()
             .map(|id| ModeInfo {
-                id: (*id).to_owned(),
+                id: id.to_owned(),
                 name: mode_display_name(id).to_owned(),
                 description: None,
             })
@@ -489,113 +512,228 @@ fn build_mode_state(
 
 fn mode_display_name(id: &str) -> &'static str {
     match id {
-        "acceptEdits" => "Accept edits",
+        "acceptEdits" => "Accept Edits",
         "plan" => "Plan",
-        "bypassPermissions" => "Bypass permissions",
+        "bypassPermissions" => "Bypass Permissions",
+        "dontAsk" => "Don't Ask",
+        "auto" => "Auto",
         _ => "Default",
     }
+}
+
+/// Split `claude-sonnet-4-6[1m]` into family / version / context for
+/// display. Mirrors upstream's `normalizeModelKey`. Returns the raw id
+/// when the family isn't recognised so unknown CLI builds still
+/// surface something readable.
+fn humanize_model_id(id: &str) -> String {
+    format_model_id(id, /* short = */ false)
+}
+
+fn short_display_name_for_model_id(id: &str) -> String {
+    format_model_id(id, /* short = */ true)
+}
+
+fn format_model_id(id: &str, _short: bool) -> String {
+    // Today the upstream short and long formatters produce identical
+    // output (both call into `humanize`). Keep one implementation;
+    // switch the boolean if we later port the divergent shorthand.
+    let original = id.trim();
+    if original.is_empty() {
+        return String::new();
+    }
+    let lower = original.to_ascii_lowercase();
+    let (without_context, context_suffix) = match lower.rfind('[') {
+        Some(open) if lower.ends_with(']') => {
+            let suffix = &lower[open + 1..lower.len() - 1];
+            (&lower[..open], Some(suffix))
+        }
+        _ => (lower.as_str(), None),
+    };
+    let trimmed = without_context.strip_prefix("claude-").unwrap_or(without_context);
+    let mut parts = trimmed.split('-').filter(|p| !p.is_empty());
+    let family_part = parts.next().unwrap_or("");
+    let family_label = match family_part {
+        "opus" => "Opus",
+        "sonnet" => "Sonnet",
+        "haiku" => "Haiku",
+        _ => return original.to_owned(),
+    };
+    let version_parts: Vec<&str> = parts.take_while(|p| p.chars().all(|c| c.is_ascii_digit())).collect();
+    let version_label = if version_parts.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", version_parts.join("."))
+    };
+    let context_label = match context_suffix {
+        Some(s) if s.eq_ignore_ascii_case("1m") => " [1M]".to_owned(),
+        Some(s) => format!(" [{s}]"),
+        None => String::new(),
+    };
+    format!("{family_label}{version_label}{context_label}")
 }
 
 /// Load past messages from the on-disk transcript and convert them
 /// into the `SessionUpdate` stream the TUI's history renderer expects.
 /// The CLI itself replays nothing on resume — it just attaches the
 /// session to the existing JSONL — so the TUI side has to backfill.
+///
+/// Mirrors upstream's `mapSessionMessagesToUpdates`:
+/// - thinking blocks are skipped (resume noise; the in-flight stream
+///   carries them when they actually matter)
+/// - assistant `tool_use` blocks emit `ToolCall` updates and are tracked
+///   in a tool-id map
+/// - `tool_result` blocks (which can appear in either role's content)
+///   look up the tracked `ToolCall` and emit a `ToolCallUpdate` carrying
+///   the result fields
+/// - image blocks fall back to a `[image]` text placeholder
 fn load_history_updates(
     prev_session_id: &str,
     cwd: &str,
 ) -> Vec<crate::agent::types::SessionUpdate> {
+    use std::collections::HashMap;
+
     let dir = if cwd.is_empty() { None } else { Some(cwd.to_owned()) };
     let messages = forge_sdk::session::scan::get_session_messages(prev_session_id, dir);
-    let mut out = Vec::with_capacity(messages.len());
+    let mut out: Vec<crate::agent::types::SessionUpdate> = Vec::with_capacity(messages.len());
+    let mut tool_calls: HashMap<String, crate::agent::types::ToolCall> = HashMap::new();
+
     for msg in messages {
         let role = msg.message.get("role").and_then(|v| v.as_str()).unwrap_or("");
         let Some(content) = msg.message.get("content") else {
             continue;
         };
-        match role {
-            "user" => append_user_history(&mut out, content),
-            "assistant" => append_assistant_history(&mut out, content),
-            _ => {}
+        // Plain string content (older transcripts use this for user turns).
+        if let Some(text) = content.as_str() {
+            push_resume_text(&mut out, role, text);
+            continue;
+        }
+        let Some(blocks) = content.as_array() else { continue };
+        for block in blocks {
+            let kind = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            // Skip thinking blocks (matches upstream's resume behaviour
+            // — the live stream carries them when actually relevant)
+            // and unknown block types.
+            match kind {
+                "text" => {
+                    if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+                        push_resume_text(&mut out, role, text);
+                    }
+                }
+                "tool_use" if role == "assistant" => {
+                    push_resume_tool_use(&mut out, &mut tool_calls, block);
+                }
+                "tool_result" | "server_tool_result" => {
+                    push_resume_tool_result(&mut out, &mut tool_calls, block);
+                }
+                "image" => {
+                    push_resume_text(&mut out, role, "[image]");
+                }
+                _ => {}
+            }
         }
     }
     out
 }
 
-fn append_user_history(out: &mut Vec<crate::agent::types::SessionUpdate>, content: &serde_json::Value) {
+fn push_resume_text(
+    out: &mut Vec<crate::agent::types::SessionUpdate>,
+    role: &str,
+    text: &str,
+) {
     use crate::agent::types::{ContentBlock, SessionUpdate};
-    if let Some(text) = content.as_str() {
-        out.push(SessionUpdate::UserMessageChunk {
-            content: ContentBlock::Text { text: text.to_owned() },
-        });
+    if text.trim().is_empty() {
         return;
     }
-    let Some(blocks) = content.as_array() else { return };
-    for block in blocks {
-        let Some(kind) = block.get("type").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if kind == "text"
-            && let Some(text) = block.get("text").and_then(|v| v.as_str())
-        {
-            out.push(SessionUpdate::UserMessageChunk {
-                content: ContentBlock::Text { text: text.to_owned() },
-            });
-        }
-        // tool_result, image, etc. are dropped here -- the TUI's tool
-        // renderer pairs results with their original ToolCall and the
-        // raw API tool_result block doesn't carry enough info to
-        // reconstruct that pairing without more bookkeeping.
-    }
+    let content = ContentBlock::Text { text: text.to_owned() };
+    out.push(if role == "assistant" {
+        SessionUpdate::AgentMessageChunk { content }
+    } else {
+        SessionUpdate::UserMessageChunk { content }
+    });
 }
 
-fn append_assistant_history(
+fn push_resume_tool_use(
     out: &mut Vec<crate::agent::types::SessionUpdate>,
-    content: &serde_json::Value,
+    tool_calls: &mut std::collections::HashMap<String, crate::agent::types::ToolCall>,
+    block: &serde_json::Value,
 ) {
-    use crate::agent::types::{ContentBlock, SessionUpdate, ToolCall};
-    let Some(blocks) = content.as_array() else { return };
-    for block in blocks {
-        let Some(kind) = block.get("type").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        match kind {
-            "text" => {
-                if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
-                    out.push(SessionUpdate::AgentMessageChunk {
-                        content: ContentBlock::Text { text: text.to_owned() },
-                    });
-                }
-            }
-            "thinking" => {
-                if let Some(text) = block.get("thinking").and_then(|v| v.as_str()) {
-                    out.push(SessionUpdate::AgentThoughtChunk {
-                        content: ContentBlock::Text { text: text.to_owned() },
-                    });
-                }
-            }
-            "tool_use" => {
-                let Some(id) = block.get("id").and_then(|v| v.as_str()) else { continue };
-                let Some(name) = block.get("name").and_then(|v| v.as_str()) else { continue };
-                out.push(SessionUpdate::ToolCall {
-                    tool_call: ToolCall {
-                        tool_call_id: id.to_owned(),
-                        title: name.to_owned(),
-                        kind: "execute".to_owned(),
-                        // History items are completed by definition.
-                        status: "completed".to_owned(),
-                        content: Vec::new(),
-                        raw_input: block.get("input").cloned(),
-                        raw_output: None,
-                        output_metadata: None,
-                        task_metadata: None,
-                        locations: Vec::new(),
-                        meta: None,
-                    },
-                });
-            }
-            _ => {}
+    use crate::agent::types::{SessionUpdate, ToolCall};
+    let Some(id) = block.get("id").and_then(|v| v.as_str()) else { return };
+    let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("Tool");
+    let tool_call = ToolCall {
+        tool_call_id: id.to_owned(),
+        title: name.to_owned(),
+        kind: "execute".to_owned(),
+        status: "in_progress".to_owned(),
+        content: Vec::new(),
+        raw_input: block.get("input").cloned(),
+        raw_output: None,
+        output_metadata: None,
+        task_metadata: None,
+        locations: Vec::new(),
+        meta: None,
+    };
+    tool_calls.insert(id.to_owned(), tool_call.clone());
+    out.push(SessionUpdate::ToolCall { tool_call });
+}
+
+fn push_resume_tool_result(
+    out: &mut Vec<crate::agent::types::SessionUpdate>,
+    tool_calls: &mut std::collections::HashMap<String, crate::agent::types::ToolCall>,
+    block: &serde_json::Value,
+) {
+    use crate::agent::types::{SessionUpdate, ToolCallUpdate, ToolCallUpdateFields};
+    let Some(tool_use_id) = block.get("tool_use_id").and_then(|v| v.as_str()) else { return };
+    let is_error = block.get("is_error").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    let raw_output = stringify_tool_result_content(block.get("content"));
+    let status = if is_error { "failed" } else { "completed" };
+
+    let fields = ToolCallUpdateFields {
+        status: Some(status.to_owned()),
+        raw_output: raw_output.clone(),
+        ..Default::default()
+    };
+
+    if let Some(base) = tool_calls.get_mut(tool_use_id) {
+        status.clone_into(&mut base.status);
+        if let Some(text) = raw_output.as_ref() {
+            base.raw_output = Some(text.clone());
         }
     }
+
+    out.push(SessionUpdate::ToolCallUpdate {
+        tool_call_update: ToolCallUpdate {
+            tool_call_id: tool_use_id.to_owned(),
+            fields,
+        },
+    });
+}
+
+/// Best-effort stringification of a `tool_result.content` payload.
+/// The CLI accepts string OR array-of-blocks. For arrays we collect
+/// all `{ "type": "text", "text": ... }` entries and join. Anything
+/// else falls back to `serde_json::to_string`. Mirrors upstream's
+/// `normalizeToolResultText` minus the per-tool richness (Read/Bash/
+/// Write/Agent), which can be layered on without changing this shape.
+fn stringify_tool_result_content(content: Option<&serde_json::Value>) -> Option<String> {
+    let content = content?;
+    if let Some(s) = content.as_str() {
+        return Some(s.to_owned());
+    }
+    if let Some(arr) = content.as_array() {
+        let mut chunks: Vec<String> = Vec::new();
+        for item in arr {
+            if item.get("type").and_then(|v| v.as_str()) == Some("text")
+                && let Some(text) = item.get("text").and_then(|v| v.as_str())
+            {
+                chunks.push(text.to_owned());
+            }
+        }
+        if !chunks.is_empty() {
+            return Some(chunks.join("\n"));
+        }
+    }
+    serde_json::to_string(content).ok()
 }
 
 /// Scan the on-disk JSONL transcripts for `cwd` and convert them into
