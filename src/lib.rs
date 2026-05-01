@@ -60,10 +60,6 @@ pub struct Cli {
     #[arg(long, short = 'C')]
     pub dir: Option<std::path::PathBuf>,
 
-    /// Path to the agent bridge script (defaults to agent-sdk/dist/bridge.js).
-    #[arg(long)]
-    pub bridge_script: Option<std::path::PathBuf>,
-
     /// Enable runtime diagnostics using a default log path when `--log-file` is omitted.
     #[arg(long)]
     pub enable_logs: bool,

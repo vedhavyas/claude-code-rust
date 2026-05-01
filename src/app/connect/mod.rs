@@ -54,11 +54,6 @@ fn resolve_startup_cwd(cli: &Cli) -> PathBuf {
 struct StartConnectionParams {
     event_tx: mpsc::UnboundedSender<ClientEvent>,
     cwd_raw: String,
-    /// Custom path to the legacy Node bridge script. Unused by the
-    /// forge-sdk backend; PR #3 removes it alongside the rest of the
-    /// Node-bridge cleanup.
-    #[allow(dead_code)]
-    bridge_script: Option<std::path::PathBuf>,
     resume_id: Option<String>,
     resume_requested: bool,
     session_launch_settings: SessionLaunchSettings,
@@ -235,7 +230,6 @@ pub fn create_app(cli: &Cli) -> App {
         last_active_turn_height_state: None,
         startup_connection_requested: false,
         connection_started: false,
-        startup_bridge_script: cli.bridge_script.clone(),
         startup_resume_id: match &cli.command {
             Some(Command::Resume { session_id: Some(id) }) => Some(id.clone()),
             _ => None,
@@ -281,7 +275,6 @@ pub fn start_connection(app: &mut App) {
     let params = StartConnectionParams {
         event_tx: app.event_tx.clone(),
         cwd_raw: app.cwd_raw.clone(),
-        bridge_script: app.startup_bridge_script.clone(),
         resume_id: app.startup_resume_id.clone(),
         resume_requested: app.startup_resume_requested,
         session_launch_settings: session_start::session_launch_settings_for_reason(
@@ -349,7 +342,6 @@ mod tests {
             command: None,
             no_update_check: true,
             dir: Some(dir.path().to_path_buf()),
-            bridge_script: None,
             enable_logs: false,
             diagnostics_preset: None,
             log_file: None,

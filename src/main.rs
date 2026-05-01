@@ -4,7 +4,6 @@
 use clap::Parser;
 use claude_code_rust::Cli;
 use claude_code_rust::error::AppError;
-use std::time::Instant;
 use tracing::info_span;
 
 #[allow(clippy::exit)]
@@ -40,20 +39,8 @@ fn run() -> anyhow::Result<()> {
                 Some(claude_code_rust::Command::Resume { .. })
             ),
             perf_telemetry_requested = perf_path.is_some(),
-            explicit_bridge_script = cli.bridge_script.is_some(),
         );
         let _entered = startup_bootstrap_span.enter();
-        let resolve_started = Instant::now();
-        let bridge_launcher =
-            claude_code_rust::agent::bridge::resolve_bridge_launcher(cli.bridge_script.as_deref())?;
-        let duration_ms = u64::try_from(resolve_started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        tracing::info!(
-            target: claude_code_rust::logging::targets::BRIDGE_LIFECYCLE,
-            event_name = "bridge_launcher_resolved",
-            message = "resolved agent bridge launcher",
-            duration_ms,
-            launcher = %bridge_launcher.describe(),
-        );
     }
 
     let rt = tokio::runtime::Runtime::new()?;
