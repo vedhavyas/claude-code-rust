@@ -62,6 +62,13 @@ pub async fn run_worker(
 ) {
     let pending: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
     let session_id_slot: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    // The bridge session holds the open-tool-call map, mode list,
+    // last-seen fast mode, etc. Lives across messages + commands.
+    // Wrapped in Arc<Mutex<>> so the spawned reader_loop and the
+    // dispatch loop can both mutate it without rearchitecting the
+    // command/event-channel topology.
+    let bridge_session: Arc<Mutex<bridge_state::BridgeSession>> =
+        Arc::new(Mutex::new(bridge_state::BridgeSession::new(String::new(), String::new())));
     let mut state: WorkerState = WorkerState::Waiting;
 
     while let Some(cmd) = command_rx.recv().await {
@@ -71,6 +78,7 @@ pub async fn run_worker(
             &event_tx,
             &pending,
             &session_id_slot,
+            &bridge_session,
         )
         .await
         {
@@ -108,6 +116,7 @@ async fn dispatch(
     event_tx: &mpsc::UnboundedSender<BridgeEvent>,
     pending: &PendingResponses,
     session_id_slot: &Arc<Mutex<String>>,
+    bridge_session: &Arc<Mutex<bridge_state::BridgeSession>>,
 ) -> anyhow::Result<()> {
     use ForgeSdkCommand as C;
     match cmd {
@@ -119,7 +128,7 @@ async fn dispatch(
                 pending,
                 session_id_slot,
             );
-            spawn_or_replace(state, event_tx, options, session_id_slot, None).await
+            spawn_or_replace(state, event_tx, options, session_id_slot, bridge_session, None).await
         }
         C::ResumeSession { session_id, launch_settings: _ } => {
             // Resume by passing the prior session id to the CLI. The
@@ -136,6 +145,7 @@ async fn dispatch(
                 event_tx,
                 options,
                 session_id_slot,
+                bridge_session,
                 Some(session_id),
             )
             .await
@@ -282,6 +292,7 @@ async fn spawn_or_replace(
     event_tx: &mpsc::UnboundedSender<BridgeEvent>,
     options: Options,
     session_id_slot: &Arc<Mutex<String>>,
+    bridge_session: &Arc<Mutex<bridge_state::BridgeSession>>,
     resume_id: Option<String>,
 ) -> anyhow::Result<()> {
     // If we already have a client, drop it first so the existing
@@ -300,7 +311,8 @@ async fn spawn_or_replace(
     // the reader; the worker keeps its own handle for command dispatch.
     let reader_client = client.clone();
     let reader_event_tx = event_tx.clone();
-    tokio::spawn(reader_loop(reader_client, reader_event_tx));
+    let reader_bridge = Arc::clone(bridge_session);
+    tokio::spawn(reader_loop(reader_client, reader_event_tx, reader_bridge));
 
     let cwd = std::env::current_dir()
         .ok()
@@ -332,18 +344,26 @@ async fn spawn_or_replace(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
 
-    // Build a temporary bridge session so resolve_current_model and
-    // build_mode_state see the right inputs. The persistent session
-    // store comes in Stage 3 when we move dispatch into the bridge.
-    let mut bs = bridge_state::BridgeSession::new(session_id.clone(), cwd.clone());
-    bs.model_id = init_model_id;
-    bs.available_models.clone_from(&available_models);
-    bs.mode = init_permission_mode;
-    bs.supports_bypass_permissions_mode = supports_bypass;
-    let current_model = session_lifecycle::resolve_current_model(&bs);
-    bs.current_model = Some(current_model.clone());
-    bridge_commands::refresh_supported_modes_for_session(&mut bs);
-    let mode = init_permission_mode.map(|m| bridge_commands::build_mode_state(&bs, m));
+    // Populate the persistent BridgeSession so the reader_loop's
+    // handle_sdk_message calls see the right starting state (model
+    // catalog, supported modes, fast mode default, …).
+    let (current_model, mode) = {
+        let mut bs = bridge_session.lock().map_err(|_| {
+            anyhow::anyhow!("forge_sdk_worker: bridge session mutex poisoned")
+        })?;
+        bs.session_id.clone_from(&session_id);
+        bs.cwd.clone_from(&cwd);
+        bs.connected = true;
+        bs.model_id = init_model_id;
+        bs.available_models.clone_from(&available_models);
+        bs.mode = init_permission_mode;
+        bs.supports_bypass_permissions_mode = supports_bypass;
+        let cm = session_lifecycle::resolve_current_model(&bs);
+        bs.current_model = Some(cm.clone());
+        bridge_commands::refresh_supported_modes_for_session(&mut bs);
+        let mode = init_permission_mode.map(|m| bridge_commands::build_mode_state(&bs, m));
+        (cm, mode)
+    };
 
     // History is loaded from the on-disk JSONL when resuming. The CLI
     // emits new turns as fresh stream-json frames, so we only need to
@@ -442,11 +462,31 @@ fn list_recent_sessions(cwd: &str) -> Vec<crate::agent::types::SessionListEntry>
         .collect()
 }
 
-async fn reader_loop(client: Client, event_tx: mpsc::UnboundedSender<BridgeEvent>) {
+async fn reader_loop(
+    client: Client,
+    event_tx: mpsc::UnboundedSender<BridgeEvent>,
+    bridge_session: Arc<Mutex<bridge_state::BridgeSession>>,
+) {
     loop {
         match client.next_event().await {
             Ok(Some(msg)) => {
-                for event in translate_message(msg) {
+                let mut buf: Vec<BridgeEvent> = Vec::new();
+                if let Ok(mut session) = bridge_session.lock() {
+                    crate::agent::bridge::message_handlers::handle_sdk_message(
+                        &mut session, &msg, &mut buf,
+                    );
+                } else {
+                    tracing::error!(
+                        target: crate::logging::targets::BRIDGE_LIFECYCLE,
+                        "forge_sdk_worker reader: bridge session mutex poisoned",
+                    );
+                }
+                // Fall through to the legacy translate_message for the
+                // bits handle_sdk_message hasn't covered yet (e.g.
+                // elicitation_request which already had its own path).
+                let mut legacy = translate_message(msg);
+                buf.append(&mut legacy);
+                for event in buf {
                     if event_tx.send(event).is_err() {
                         return;
                     }

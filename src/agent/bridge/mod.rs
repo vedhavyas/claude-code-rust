@@ -21,6 +21,7 @@ pub mod cache_policy;
 pub mod commands;
 pub mod events;
 pub mod history;
+pub mod message_handlers;
 pub mod session_lifecycle;
 pub mod shared;
 pub mod state;
