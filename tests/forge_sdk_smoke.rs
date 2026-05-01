@@ -173,6 +173,233 @@ async fn forge_sdk_e2e_tool_call_emits_event() {
     let _ = tokio::time::timeout(Duration::from_secs(5), worker).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs a real `claude` binary on PATH; burns API budget"]
+async fn forge_sdk_e2e_cancel_mid_turn() {
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let worker = tokio::spawn(forge_sdk_worker::run_worker(cmd_rx, event_tx));
+    let agent: Rc<dyn AgentBridge> = Rc::new(ForgeSdkBridge::new(cmd_tx));
+
+    agent
+        .new_session(
+            std::env::current_dir().unwrap().to_string_lossy().into_owned(),
+            SessionLaunchSettings::default(),
+        )
+        .expect("new_session queued");
+    let session_id = await_connected(&mut event_rx, Duration::from_secs(30)).await;
+    eprintln!("e2e cancel: connected to {session_id}");
+
+    // Kick off a turn likely to take a few seconds (writing a long
+    // poem). We cancel before letting it finish — the worker should
+    // route the interrupt to the CLI and emit either TurnComplete or
+    // TurnError shortly after.
+    agent
+        .prompt_text(
+            session_id.clone(),
+            "Write a 500-word poem about Rust ownership semantics.".to_owned(),
+        )
+        .expect("prompt queued");
+
+    // Give the CLI a beat to start the turn, then cancel. We don't
+    // gate on receiving a chunk first — a long task may emit thinking
+    // chunks (which the translator drops today) or no chunk at all
+    // before the interrupt lands. The contract under test is: the
+    // worker forwards `cancel` to the CLI and a terminal frame
+    // (TurnComplete or TurnError) reaches us.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    agent.cancel(session_id).expect("cancel queued");
+    eprintln!("e2e cancel: interrupt sent");
+
+    // Drain until we see TurnComplete or TurnError.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut terminal = None;
+    while tokio::time::Instant::now() < deadline {
+        let Ok(Some(event)) = tokio::time::timeout(
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            event_rx.recv(),
+        )
+        .await
+        else {
+            break;
+        };
+        match event {
+            BridgeEvent::TurnComplete { .. } => {
+                terminal = Some("complete");
+                break;
+            }
+            BridgeEvent::TurnError { message, .. } => {
+                eprintln!("e2e cancel: TurnError {message}");
+                terminal = Some("error");
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(terminal.is_some(), "no terminal turn frame after cancel");
+    eprintln!("e2e cancel: turn finalized as {terminal:?}");
+
+    drop(agent);
+    let _ = tokio::time::timeout(Duration::from_secs(5), worker).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs a real `claude` binary on PATH; burns API budget"]
+async fn forge_sdk_e2e_status_and_context_snapshots() {
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let worker = tokio::spawn(forge_sdk_worker::run_worker(cmd_rx, event_tx));
+    let agent: Rc<dyn AgentBridge> = Rc::new(ForgeSdkBridge::new(cmd_tx));
+
+    agent
+        .new_session(
+            std::env::current_dir().unwrap().to_string_lossy().into_owned(),
+            SessionLaunchSettings::default(),
+        )
+        .expect("new_session queued");
+    let session_id = await_connected(&mut event_rx, Duration::from_secs(30)).await;
+    eprintln!("e2e status: connected to {session_id}");
+
+    // Drive a tiny prompt so the CLI's account info and context-usage
+    // numbers are populated. account_info() returns None until at
+    // least one stream-json frame mentions it.
+    agent
+        .prompt_text(session_id.clone(), "Reply with OK.".to_owned())
+        .expect("prompt queued");
+    let _ = await_turn(&mut event_rx, Duration::from_secs(60)).await;
+
+    agent
+        .get_status_snapshot(session_id.clone())
+        .expect("status queued");
+    agent
+        .get_context_usage(session_id.clone())
+        .expect("context queued");
+
+    // Drain until we've seen both, with a generous timeout.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let mut saw_status = false;
+    let mut saw_context = false;
+    while tokio::time::Instant::now() < deadline && !(saw_status && saw_context) {
+        let Ok(Some(event)) = tokio::time::timeout(
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            event_rx.recv(),
+        )
+        .await
+        else {
+            break;
+        };
+        match event {
+            BridgeEvent::StatusSnapshot { .. } => saw_status = true,
+            BridgeEvent::ContextUsage { .. } => saw_context = true,
+            _ => {}
+        }
+    }
+    assert!(saw_status, "expected StatusSnapshot event");
+    assert!(saw_context, "expected ContextUsage event");
+    eprintln!("e2e status: both snapshots delivered");
+
+    drop(agent);
+    let _ = tokio::time::timeout(Duration::from_secs(5), worker).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs a real `claude` binary on PATH; burns API budget"]
+async fn forge_sdk_e2e_mcp_snapshot() {
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let worker = tokio::spawn(forge_sdk_worker::run_worker(cmd_rx, event_tx));
+    let agent: Rc<dyn AgentBridge> = Rc::new(ForgeSdkBridge::new(cmd_tx));
+
+    agent
+        .new_session(
+            std::env::current_dir().unwrap().to_string_lossy().into_owned(),
+            SessionLaunchSettings::default(),
+        )
+        .expect("new_session queued");
+    let session_id = await_connected(&mut event_rx, Duration::from_secs(30)).await;
+    eprintln!("e2e mcp: connected to {session_id}");
+
+    agent
+        .get_mcp_snapshot(session_id)
+        .expect("mcp snapshot queued");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let mut got = false;
+    while tokio::time::Instant::now() < deadline {
+        let Ok(Some(event)) = tokio::time::timeout(
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            event_rx.recv(),
+        )
+        .await
+        else {
+            break;
+        };
+        if let BridgeEvent::McpSnapshot { servers, error, .. } = event {
+            // The list may be empty (no MCP servers configured) — we
+            // only care that the round-trip works without error.
+            assert!(error.is_none(), "MCP snapshot error: {error:?}");
+            eprintln!("e2e mcp: snapshot returned {} server(s)", servers.len());
+            got = true;
+            break;
+        }
+    }
+    assert!(got, "expected McpSnapshot event");
+
+    drop(agent);
+    let _ = tokio::time::timeout(Duration::from_secs(5), worker).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs a real `claude` binary on PATH; burns API budget"]
+async fn forge_sdk_e2e_resume_session() {
+    // Phase 1: spawn a fresh session, drive one prompt, capture sid.
+    #[allow(clippy::similar_names)]
+    let session_id = {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let worker = tokio::spawn(forge_sdk_worker::run_worker(cmd_rx, event_tx));
+        let agent: Rc<dyn AgentBridge> = Rc::new(ForgeSdkBridge::new(cmd_tx));
+
+        agent
+            .new_session(
+                std::env::current_dir().unwrap().to_string_lossy().into_owned(),
+                SessionLaunchSettings::default(),
+            )
+            .expect("new_session queued");
+        let sid = await_connected(&mut event_rx, Duration::from_secs(30)).await;
+        eprintln!("e2e resume: phase 1 session {sid}");
+
+        agent
+            .prompt_text(sid.clone(), "Reply with the word PERSIST.".to_owned())
+            .expect("phase 1 prompt queued");
+        let _ = await_turn(&mut event_rx, Duration::from_secs(60)).await;
+
+        // Tear phase 1 down so the underlying CLI subprocess exits and
+        // its session state lands on disk.
+        drop(agent);
+        let _ = tokio::time::timeout(Duration::from_secs(5), worker).await;
+        sid
+    };
+
+    // Phase 2: resume by id on a fresh worker.
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let worker = tokio::spawn(forge_sdk_worker::run_worker(cmd_rx, event_tx));
+    let agent: Rc<dyn AgentBridge> = Rc::new(ForgeSdkBridge::new(cmd_tx));
+
+    agent
+        .resume_session(session_id, SessionLaunchSettings::default())
+        .expect("resume_session queued");
+    // The CLI may issue a brand-new session id when resuming; what we
+    // care about is that we receive a Connected event without a
+    // ConnectionFailed in between.
+    let resumed_id = await_connected(&mut event_rx, Duration::from_secs(30)).await;
+    eprintln!("e2e resume: phase 2 connected as {resumed_id}");
+
+    drop(agent);
+    let _ = tokio::time::timeout(Duration::from_secs(5), worker).await;
+}
+
 async fn await_connected(
     rx: &mut mpsc::UnboundedReceiver<BridgeEvent>,
     timeout: Duration,
