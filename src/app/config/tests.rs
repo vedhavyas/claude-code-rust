@@ -1266,6 +1266,8 @@ fn mcp_enter_opens_details_overlay_instead_of_closing_config() {
         }),
         scope: Some("project".to_owned()),
         tools: vec![],
+            sampling_configured: None,
+            sampling_required: None,
     }];
 
     handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -1307,6 +1309,8 @@ fn mcp_tab_refresh_key_requests_snapshot() {
         config: None,
         scope: None,
         tools: Vec::new(),
+            sampling_configured: None,
+            sampling_required: None,
     });
 
     handle_key(&mut app, KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
@@ -1357,6 +1361,8 @@ fn refresh_mcp_snapshot_clears_existing_servers_before_request() {
         config: None,
         scope: None,
         tools: Vec::new(),
+            sampling_configured: None,
+            sampling_required: None,
     });
 
     refresh_mcp_snapshot(&mut app);
@@ -1399,6 +1405,8 @@ fn claudeai_proxy_server_shows_disabled_authenticate_action() {
         }),
         scope: Some("session".to_owned()),
         tools: Vec::new(),
+            sampling_configured: None,
+            sampling_required: None,
     };
 
     let actions = available_mcp_actions(&server);

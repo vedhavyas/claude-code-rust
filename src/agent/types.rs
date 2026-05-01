@@ -622,6 +622,15 @@ pub struct McpServerStatus {
     pub scope: Option<String>,
     #[serde(default)]
     pub tools: Vec<McpTool>,
+    /// Whether the server has been wired with a model-sampling
+    /// callback. UIs render a "sampling configured" badge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampling_configured: Option<bool>,
+    /// Whether the server's MCP manifest declares sampling as
+    /// required. UIs warn when `sampling_configured == Some(false)`
+    /// and `sampling_required == Some(true)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampling_required: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

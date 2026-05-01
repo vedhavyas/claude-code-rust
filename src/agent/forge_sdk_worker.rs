@@ -132,21 +132,20 @@ async fn dispatch(
             );
             Ok(())
         }
-        C::GetStatusSnapshot { session_id: _ } => {
-            // forge-sdk gap: no typed account_info accessor; raw JSON
-            // is on Client::initial_session_data(). Surface a minimal
-            // event so the UI's status pane doesn't hang.
-            tracing::debug!(
-                target: crate::logging::targets::BRIDGE_PROTOCOL,
-                "forge_sdk_worker: status_snapshot stub (forge-sdk gap)",
-            );
+        C::GetStatusSnapshot { session_id } => {
+            let client = require_running(state, "GetStatusSnapshot")?;
+            let account = client.account_info().map(translate_account_info).unwrap_or_default();
+            let _ = event_tx.send(BridgeEvent::StatusSnapshot { session_id, account });
             Ok(())
         }
-        C::GetContextUsage { session_id: _ } => {
-            let _client = require_running(state, "GetContextUsage")?;
-            // TODO: client.get_context_usage().await -> emit
-            // BridgeEvent::SessionUpdate or similar. Wired alongside
-            // the rest of the snapshot machinery.
+        C::GetContextUsage { session_id } => {
+            let client = require_running(state, "GetContextUsage")?;
+            let usage = client.get_context_usage().await?;
+            let percentage = clamp_percentage_to_u8(usage.percentage);
+            let _ = event_tx.send(BridgeEvent::ContextUsage {
+                session_id,
+                percentage: Some(percentage),
+            });
             Ok(())
         }
         C::ReloadPlugins { session_id: _ } => {
@@ -154,17 +153,26 @@ async fn dispatch(
             let _ = client.reload_plugins().await?;
             Ok(())
         }
-        C::GetMcpSnapshot { session_id: _ }
-        | C::ReconnectMcpServer { .. }
+        C::GetMcpSnapshot { session_id } => {
+            let client = require_running(state, "GetMcpSnapshot")?;
+            let response = client.mcp_status().await?;
+            let servers = response
+                .mcp_servers
+                .into_iter()
+                .map(translate_mcp_server_status)
+                .collect();
+            let _ = event_tx.send(BridgeEvent::McpSnapshot { session_id, servers, error: None });
+            Ok(())
+        }
+        C::ReconnectMcpServer { .. }
         | C::ToggleMcpServer { .. }
         | C::SetMcpServers { .. }
         | C::AuthenticateMcpServer { .. }
         | C::ClearMcpAuth { .. }
         | C::SubmitMcpOauthCallbackUrl { .. } => {
-            // MCP surface lands in a follow-up. The forge-sdk methods
-            // exist (mcp_status, mcp_reconnect, etc.) but the
-            // BridgeEvent emission shape needs an additional translator
-            // path -- handled with the can_use_tool work.
+            // MCP mutation commands land alongside the can_use_tool
+            // wiring; for now they're best-effort no-ops so the UI
+            // can degrade gracefully.
             tracing::debug!(
                 target: crate::logging::targets::BRIDGE_MCP,
                 "forge_sdk_worker: MCP command stubbed for now",
@@ -326,6 +334,81 @@ fn parse_permission_mode(mode: &str) -> anyhow::Result<PermissionMode> {
             "forge_sdk_worker: unknown permission mode {other:?}"
         )),
     }
+}
+
+fn translate_account_info(info: forge_sdk::AccountInfo) -> crate::agent::types::AccountInfo {
+    // forge_sdk::AccountInfo and crate::agent::types::AccountInfo
+    // have the same field names; field-by-field copy keeps them
+    // independent so either side can grow without coupling.
+    crate::agent::types::AccountInfo {
+        email: info.email,
+        organization: info.organization,
+        subscription_type: info.subscription_type,
+        token_source: info.token_source,
+        api_key_source: info.api_key_source,
+        api_provider: info.api_provider,
+    }
+}
+
+fn translate_mcp_server_status(
+    sdk: forge_sdk::McpServerStatus,
+) -> crate::agent::types::McpServerStatus {
+    crate::agent::types::McpServerStatus {
+        name: sdk.name,
+        status: translate_mcp_status(sdk.status),
+        server_info: sdk
+            .server_info
+            .map(|info| crate::agent::types::McpServerInfo { name: info.name, version: info.version }),
+        error: sdk.error,
+        // forge-sdk types `config` as `Option<Value>` because the CLI
+        // accepts variants forge-sdk doesn't model (claudeai-proxy).
+        // Round-trip through serde here; on shape mismatch the typed
+        // enum returns None, which the UI renders as "(unknown config)".
+        config: sdk
+            .config
+            .and_then(|v| serde_json::from_value(v).ok()),
+        scope: sdk.scope,
+        tools: sdk
+            .tools
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| crate::agent::types::McpTool {
+                name: t.name,
+                description: t.description,
+                annotations: t.annotations.map(|a| crate::agent::types::McpToolAnnotations {
+                    read_only: a.read_only,
+                    destructive: a.destructive,
+                    open_world: a.open_world,
+                }),
+            })
+            .collect(),
+        sampling_configured: sdk.sampling_configured,
+        sampling_required: sdk.sampling_required,
+    }
+}
+
+fn translate_mcp_status(
+    sdk: forge_sdk::McpServerConnectionStatus,
+) -> crate::agent::types::McpServerConnectionStatus {
+    use forge_sdk::McpServerConnectionStatus as S;
+    use crate::agent::types::McpServerConnectionStatus as T;
+    match sdk {
+        S::Connected => T::Connected,
+        S::Failed => T::Failed,
+        S::NeedsAuth => T::NeedsAuth,
+        S::Pending => T::Pending,
+        S::Disabled => T::Disabled,
+    }
+}
+
+fn clamp_percentage_to_u8(p: f64) -> u8 {
+    if p.is_nan() {
+        return 0;
+    }
+    let clamped = p.clamp(0.0, 100.0).round();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let n = clamped as u8;
+    n
 }
 
 fn placeholder_current_model() -> CurrentModel {

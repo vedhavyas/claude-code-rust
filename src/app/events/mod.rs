@@ -1459,6 +1459,8 @@ mod tests {
             config: None,
             scope: None,
             tools: Vec::new(),
+            sampling_configured: None,
+            sampling_required: None,
         });
 
         handle_client_event(&mut app, connected_event("claude-updated"));
@@ -1795,6 +1797,8 @@ mod tests {
             config: None,
             scope: None,
             tools: Vec::new(),
+            sampling_configured: None,
+            sampling_required: None,
         });
 
         handle_client_event(
@@ -1847,6 +1851,8 @@ mod tests {
             config: None,
             scope: None,
             tools: Vec::new(),
+            sampling_configured: None,
+            sampling_required: None,
         });
 
         handle_client_event(
@@ -1976,6 +1982,8 @@ mod tests {
             config: None,
             scope: None,
             tools: Vec::new(),
+            sampling_configured: None,
+            sampling_required: None,
         });
 
         handle_client_event(
@@ -1990,6 +1998,8 @@ mod tests {
                     config: None,
                     scope: None,
                     tools: Vec::new(),
+            sampling_configured: None,
+            sampling_required: None,
                 }],
                 error: None,
             },
