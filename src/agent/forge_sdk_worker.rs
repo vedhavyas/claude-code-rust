@@ -803,7 +803,21 @@ fn build_options_with_callback(
         }
     };
 
-    let mut b = OptionsBuilder::new().can_use_tool(callback);
+    // Setting `--permission-prompt-tool stdio` forces the CLI to route
+    // every permission/question prompt (including AskUserQuestion)
+    // through the SDK's can_use_tool callback over the stream-json
+    // pipe instead of resolving them in-process. Without this, the
+    // CLI's auto-mode classifier or settings.json
+    // skipAutoPermissionPrompt may short-circuit the callback —
+    // AskUserQuestion in particular never reaches our run_ask_user_question
+    // driver, so the model's question runs the tool with no answers
+    // and returns "Answer questions?" as a fallback prompt.
+    //
+    // The JS SDK upstream sets this implicitly when canUseTool is
+    // registered; forge-sdk doesn't, so we set it here.
+    let mut b = OptionsBuilder::new()
+        .can_use_tool(callback)
+        .permission_prompt_tool_name("stdio");
     if !cwd.is_empty() {
         b = b.cwd(PathBuf::from(cwd));
     }
