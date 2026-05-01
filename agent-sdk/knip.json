@@ -1,9 +1,0 @@
-{
-  "$schema": "./node_modules/knip/schema.json",
-  "entry": [
-    "src/**/*.test.ts"
-  ],
-  "project": [
-    "src/**/*.ts"
-  ]
-}
