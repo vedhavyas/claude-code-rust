@@ -380,8 +380,13 @@ const EDITOR_MODE_OPTIONS: &[SettingOption] = &[
 ];
 const OPUS_MODEL_ALIAS_ID: &str = "opus";
 const OPUS_MODEL_ALIAS_LABEL: &str = "Opus";
-const DEFAULT_EFFORT_LEVELS: [EffortLevel; 3] =
-    [EffortLevel::Low, EffortLevel::Medium, EffortLevel::High];
+const DEFAULT_EFFORT_LEVELS: [EffortLevel; 5] = [
+    EffortLevel::Low,
+    EffortLevel::Medium,
+    EffortLevel::High,
+    EffortLevel::Xhigh,
+    EffortLevel::Max,
+];
 const LANGUAGE_MIN_CHARS: usize = 2;
 const LANGUAGE_MAX_CHARS: usize = 30;
 
@@ -389,6 +394,8 @@ const EFFORT_OPTIONS: &[SettingOption] = &[
     SettingOption { stored: "low", label: "Low" },
     SettingOption { stored: "medium", label: "Medium" },
     SettingOption { stored: "high", label: "High" },
+    SettingOption { stored: "xhigh", label: "Extra High" },
+    SettingOption { stored: "max", label: "Max" },
 ];
 
 const CONFIG_SETTINGS: [SettingSpec; 14] = [
