@@ -52,8 +52,7 @@ By participating, you agree to uphold this code.
 ### Prerequisites
 
 - Rust 1.88.0+ (install via https://rustup.rs)
-- Node.js 18+ (for the in-repo agent bridge)
-- npx (included with Node.js)
+- `claude` CLI binary on PATH
 
 ### Clone and Build
 
@@ -104,32 +103,41 @@ cargo +1.88.0 check --all-features
 
 ## Architecture
 
-The project is split into a Rust binary and an in-repo TypeScript bridge:
+Pure Rust binary that drives the `claude` CLI in-process via
+`forge-sdk`:
 
 ```
 src/
-├── main.rs          # Entry point – CLI parsing, tokio runtime + LocalSet
-├── agent/           # Bridge spawning, NDJSON client, wire types, event handling
-├── app/             # Application state, event loop, config, permissions, input
-└── ui/              # Ratatui widgets – chat view, markdown, diffs, footer, themes
-
-agent-sdk/
-└── src/             # TypeScript NDJSON stdio bridge wrapping @anthropic-ai/claude-agent-sdk
+├── main.rs                          # CLI parsing, tokio runtime + LocalSet
+├── agent/
+│   ├── client.rs                    # AgentBridge trait + PromptResponse
+│   ├── forge_sdk_bridge.rs          # AgentBridge impl, ForgeSdkCommand enum
+│   ├── forge_sdk_worker.rs          # Drives forge_sdk::Client; can_use_tool callback
+│   ├── forge_sdk_translate.rs       # SDK Message -> BridgeEvent
+│   ├── wire.rs / events.rs / types.rs   # BridgeEvent shapes consumed by the UI
+│   └── error_handling.rs            # Turn-error classification
+├── app/                             # App state, event loop, permissions, input
+└── ui/                              # Ratatui widgets
 ```
 
 **How the pieces connect:**
 
-1. `main.rs` boots a `tokio::task::LocalSet` (required because the bridge child
-   process handles are `!Send`) and hands control to `app::run_tui`.
-2. `agent::client::BridgeClient` spawns `agent-sdk/dist/bridge.mjs` as a child
-   process and communicates over **NDJSON on stdin/stdout**.
-3. The Rust side sends `CommandEnvelope`s (start session, submit prompt,
-   permission responses, …) and receives `EventEnvelope`s (assistant messages,
-   tool calls, errors, …).
-4. `app/` ties everything together: it owns the `App` state, routes terminal
-   events and bridge events through `tokio::sync::mpsc` channels, and drives the
-   TUI render loop.
-5. `ui/` is a pure rendering layer built on **Ratatui + Crossterm** (cross-platform).
+1. `main.rs` boots a `tokio::task::LocalSet` (the App holds `Rc`
+   types, so the connection task lives inside the LocalSet) and
+   hands control to `app::run_tui`.
+2. `agent/connect/bridge_lifecycle.rs` builds an
+   `Rc<dyn AgentBridge>` backed by `ForgeSdkBridge`, publishes it
+   onto `App.conn`, and spawns `forge_sdk_worker::run_worker` on the
+   multi-threaded runtime.
+3. The worker owns one `forge_sdk::Client` after `NewSession` and
+   forwards subsequent `ForgeSdkCommand`s as direct method calls. A
+   reader subtask drains `Client::next_event()` and translates SDK
+   `Message`s into `BridgeEvent`s the existing `app::connect::event_dispatch`
+   already understands.
+4. Permission and question prompts go through a `can_use_tool`
+   callback — the worker emits `BridgeEvent::PermissionRequest` and
+   awaits the TUI's response on a side-channel `oneshot`.
+5. `ui/` is a pure rendering layer built on Ratatui + Crossterm.
 
 ## License
 
