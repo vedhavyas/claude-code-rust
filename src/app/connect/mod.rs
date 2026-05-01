@@ -27,7 +27,6 @@ use crate::agent::client::AgentBridge;
 use crate::agent::events::ClientEvent;
 use crate::agent::model;
 use crate::agent::wire::SessionLaunchSettings;
-use crate::error::AppError;
 use crate::{Cli, Command};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -50,13 +49,6 @@ fn resolve_startup_cwd(cli: &Cli) -> PathBuf {
     cli.dir
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-}
-
-/// Used only by the legacy Node-bridge spawn path; PR #3 deletes this
-/// alongside the rest of the Node-bridge cleanup.
-#[allow(dead_code)]
-fn extract_app_error(err: &anyhow::Error) -> Option<AppError> {
-    err.chain().find_map(|cause| cause.downcast_ref::<AppError>().cloned())
 }
 
 struct StartConnectionParams {

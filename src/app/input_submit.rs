@@ -186,14 +186,14 @@ fn dispatch_prompt_turn(app: &mut App, text: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::wire::BridgeCommand;
+    use crate::agent::forge_sdk_bridge::ForgeSdkCommand;
     use crate::app::ActiveView;
 
     fn app_with_connection()
-    -> (App, tokio::sync::mpsc::UnboundedReceiver<crate::agent::wire::CommandEnvelope>) {
+    -> (App, tokio::sync::mpsc::UnboundedReceiver<crate::agent::forge_sdk_bridge::ForgeSdkCommand>) {
         let mut app = App::test_default();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        app.conn = Some(std::rc::Rc::new(crate::agent::client::AgentConnection::new(tx)));
+        app.conn = Some(std::rc::Rc::new(crate::agent::forge_sdk_bridge::ForgeSdkBridge::new(tx)));
         app.session_id = Some(model::SessionId::new("session-1"));
         (app, rx)
     }
@@ -213,8 +213,8 @@ mod tests {
         assert!(app.messages.is_empty());
         let envelope = rx.try_recv().expect("cancel command should be sent");
         assert!(matches!(
-            envelope.command,
-            BridgeCommand::CancelTurn { session_id } if session_id == "session-1"
+            envelope,
+            ForgeSdkCommand::Cancel { session_id } if session_id == "session-1"
         ));
     }
 
@@ -232,8 +232,8 @@ mod tests {
         assert!(!app.pending_auto_submit_after_cancel);
         let envelope = rx.try_recv().expect("single cancel command should be sent");
         assert!(matches!(
-            envelope.command,
-            BridgeCommand::CancelTurn { session_id } if session_id == "session-1"
+            envelope,
+            ForgeSdkCommand::Cancel { session_id } if session_id == "session-1"
         ));
         assert!(rx.try_recv().is_err(), "manual promotion should not send second cancel");
     }
@@ -249,7 +249,7 @@ mod tests {
         assert!(app.pending_auto_submit_after_cancel);
         let cancel = rx.try_recv().expect("cancel command should be sent");
         assert!(matches!(
-            cancel.command, BridgeCommand::CancelTurn { session_id } if session_id == "session-1"
+            cancel, ForgeSdkCommand::Cancel { session_id } if session_id == "session-1"
         ));
 
         request_cancel(&mut app, CancelOrigin::Manual).expect("manual cancel request");
@@ -280,7 +280,7 @@ mod tests {
         assert!(app.pending_auto_submit_after_cancel);
         let envelope = rx.try_recv().expect("first cancel command should be sent");
         assert!(matches!(
-            envelope.command, BridgeCommand::CancelTurn { session_id } if session_id == "session-1"
+            envelope, ForgeSdkCommand::Cancel { session_id } if session_id == "session-1"
         ));
         assert!(rx.try_recv().is_err(), "second submit should not send extra cancel");
     }
@@ -297,8 +297,8 @@ mod tests {
         assert_eq!(app.pending_cancel_origin, Some(CancelOrigin::Manual));
         let envelope = rx.try_recv().expect("cancel command should be sent");
         assert!(matches!(
-            envelope.command,
-            BridgeCommand::CancelTurn { session_id } if session_id == "session-1"
+            envelope,
+            ForgeSdkCommand::Cancel { session_id } if session_id == "session-1"
         ));
     }
 
@@ -328,7 +328,7 @@ mod tests {
         assert!(app.pending_auto_submit_after_cancel);
         let cancel = rx.try_recv().expect("cancel command should be sent");
         assert!(matches!(
-            cancel.command, BridgeCommand::CancelTurn { session_id } if session_id == "session-1"
+            cancel, ForgeSdkCommand::Cancel { session_id } if session_id == "session-1"
         ));
 
         app.status = AppStatus::Ready;
@@ -341,8 +341,8 @@ mod tests {
         assert_eq!(app.messages.len(), 2);
         let prompt = rx.try_recv().expect("prompt command should be sent");
         assert!(matches!(
-            prompt.command,
-            BridgeCommand::Prompt { session_id, .. } if session_id == "session-1"
+            prompt,
+            ForgeSdkCommand::Prompt { session_id, .. } if session_id == "session-1"
         ));
     }
 
@@ -363,7 +363,7 @@ mod tests {
         assert!(app.pending_auto_submit_after_cancel);
         let cancel = rx.try_recv().expect("cancel command should be sent");
         assert!(matches!(
-            cancel.command, BridgeCommand::CancelTurn { session_id } if session_id == "session-1"
+            cancel, ForgeSdkCommand::Cancel { session_id } if session_id == "session-1"
         ));
 
         app.status = AppStatus::Ready;
@@ -381,7 +381,7 @@ mod tests {
     fn dispatch_prompt_turn_without_session_id_leaves_state_unchanged() {
         let mut app = App::test_default();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        app.conn = Some(std::rc::Rc::new(crate::agent::client::AgentConnection::new(tx)));
+        app.conn = Some(std::rc::Rc::new(crate::agent::forge_sdk_bridge::ForgeSdkBridge::new(tx)));
         app.status = AppStatus::Ready;
 
         dispatch_prompt_turn(&mut app, "hello".into());

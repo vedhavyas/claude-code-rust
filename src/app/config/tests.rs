@@ -1,6 +1,6 @@
 use super::*;
 use crate::agent::model::AvailableModel;
-use crate::agent::wire::BridgeCommand;
+use crate::agent::forge_sdk_bridge::ForgeSdkCommand;
 use crate::app::AppStatus;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
@@ -38,10 +38,10 @@ fn select_setting(app: &mut App, setting_id: SettingId) {
 }
 
 fn app_with_status_connection()
--> (App, tokio::sync::mpsc::UnboundedReceiver<crate::agent::wire::CommandEnvelope>) {
+-> (App, tokio::sync::mpsc::UnboundedReceiver<crate::agent::forge_sdk_bridge::ForgeSdkCommand>) {
     let mut app = App::test_default();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    app.conn = Some(Rc::new(crate::agent::client::AgentConnection::new(tx)));
+    app.conn = Some(Rc::new(crate::agent::forge_sdk_bridge::ForgeSdkBridge::new(tx)));
     app.session_id = Some(crate::agent::model::SessionId::new("session-1"));
     app.config.active_tab = ConfigTab::Status;
     app.recent_sessions = vec![crate::app::RecentSessionInfo {
@@ -620,8 +620,8 @@ fn status_tab_rename_confirm_sends_bridge_command() {
 
     let envelope = rx.try_recv().expect("rename command");
     assert_eq!(
-        envelope.command,
-        BridgeCommand::RenameSession {
+        envelope,
+        ForgeSdkCommand::RenameSession {
             session_id: "session-1".to_owned(),
             title: "Renamed session".to_owned(),
         }
@@ -654,8 +654,8 @@ fn status_tab_rename_empty_confirm_clears_custom_title() {
 
     let envelope = rx.try_recv().expect("rename command");
     assert_eq!(
-        envelope.command,
-        BridgeCommand::RenameSession { session_id: "session-1".to_owned(), title: String::new() }
+        envelope,
+        ForgeSdkCommand::RenameSession { session_id: "session-1".to_owned(), title: String::new() }
     );
     assert_eq!(app.config.status_message.as_deref(), Some("Clearing session name..."));
     assert!(matches!(
@@ -689,8 +689,8 @@ fn status_tab_g_generates_session_title_from_current_title_fallback() {
 
     let envelope = rx.try_recv().expect("generate command");
     assert_eq!(
-        envelope.command,
-        BridgeCommand::GenerateSessionTitle {
+        envelope,
+        ForgeSdkCommand::GenerateSessionTitle {
             session_id: "session-1".to_owned(),
             description: "Current custom title".to_owned(),
         }
@@ -1298,7 +1298,7 @@ fn mcp_details_overlay_enter_closes_overlay() {
 fn mcp_tab_refresh_key_requests_snapshot() {
     let (_dir, mut app) = open_settings_test_app();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    app.conn = Some(Rc::new(crate::agent::client::AgentConnection::new(tx)));
+    app.conn = Some(Rc::new(crate::agent::forge_sdk_bridge::ForgeSdkBridge::new(tx)));
     app.session_id = Some(crate::agent::model::SessionId::new("session-1"));
     app.config.active_tab = ConfigTab::Mcp;
     app.mcp.servers.push(crate::agent::types::McpServerStatus {
@@ -1317,13 +1317,13 @@ fn mcp_tab_refresh_key_requests_snapshot() {
 
     let envelope = rx.try_recv().expect("runtime reload command");
     assert_eq!(
-        envelope.command,
-        BridgeCommand::ReloadPlugins { session_id: "session-1".to_owned() }
+        envelope,
+        ForgeSdkCommand::ReloadPlugins { session_id: "session-1".to_owned() }
     );
     let envelope = rx.try_recv().expect("mcp snapshot command");
     assert_eq!(
-        envelope.command,
-        BridgeCommand::GetMcpSnapshot { session_id: "session-1".to_owned() }
+        envelope,
+        ForgeSdkCommand::GetMcpSnapshot { session_id: "session-1".to_owned() }
     );
     assert!(app.mcp.in_flight);
     assert!(app.mcp.servers.is_empty());
@@ -1333,7 +1333,7 @@ fn mcp_tab_refresh_key_requests_snapshot() {
 fn request_mcp_snapshot_sends_outside_mcp_tab() {
     let (_dir, mut app) = open_settings_test_app();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    app.conn = Some(Rc::new(crate::agent::client::AgentConnection::new(tx)));
+    app.conn = Some(Rc::new(crate::agent::forge_sdk_bridge::ForgeSdkBridge::new(tx)));
     app.session_id = Some(crate::agent::model::SessionId::new("session-1"));
     app.config.active_tab = ConfigTab::Status;
 
@@ -1341,8 +1341,8 @@ fn request_mcp_snapshot_sends_outside_mcp_tab() {
 
     let envelope = rx.try_recv().expect("mcp snapshot command");
     assert_eq!(
-        envelope.command,
-        BridgeCommand::GetMcpSnapshot { session_id: "session-1".to_owned() }
+        envelope,
+        ForgeSdkCommand::GetMcpSnapshot { session_id: "session-1".to_owned() }
     );
     assert!(app.mcp.in_flight);
 }
@@ -1351,7 +1351,7 @@ fn request_mcp_snapshot_sends_outside_mcp_tab() {
 fn refresh_mcp_snapshot_clears_existing_servers_before_request() {
     let (_dir, mut app) = open_settings_test_app();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    app.conn = Some(Rc::new(crate::agent::client::AgentConnection::new(tx)));
+    app.conn = Some(Rc::new(crate::agent::forge_sdk_bridge::ForgeSdkBridge::new(tx)));
     app.session_id = Some(crate::agent::model::SessionId::new("session-1"));
     app.mcp.servers.push(crate::agent::types::McpServerStatus {
         name: "stale".to_owned(),
@@ -1369,8 +1369,8 @@ fn refresh_mcp_snapshot_clears_existing_servers_before_request() {
 
     let envelope = rx.try_recv().expect("mcp snapshot command");
     assert_eq!(
-        envelope.command,
-        BridgeCommand::GetMcpSnapshot { session_id: "session-1".to_owned() }
+        envelope,
+        ForgeSdkCommand::GetMcpSnapshot { session_id: "session-1".to_owned() }
     );
     assert!(app.mcp.servers.is_empty());
     assert!(app.mcp.in_flight);
@@ -1380,7 +1380,7 @@ fn refresh_mcp_snapshot_clears_existing_servers_before_request() {
 fn refresh_mcp_snapshot_if_needed_skips_outside_mcp_tab() {
     let (_dir, mut app) = open_settings_test_app();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    app.conn = Some(Rc::new(crate::agent::client::AgentConnection::new(tx)));
+    app.conn = Some(Rc::new(crate::agent::forge_sdk_bridge::ForgeSdkBridge::new(tx)));
     app.session_id = Some(crate::agent::model::SessionId::new("session-1"));
     app.config.active_tab = ConfigTab::Status;
 

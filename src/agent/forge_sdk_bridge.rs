@@ -48,7 +48,7 @@ use crate::agent::wire::SessionLaunchSettings;
 /// trait surface of [`AgentBridge`] minus the (sync) plumbing — the
 /// worker translates each variant into one or more
 /// `forge_sdk::Client` async calls.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ForgeSdkCommand {
     Prompt {
         session_id: String,

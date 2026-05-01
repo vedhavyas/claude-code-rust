@@ -509,15 +509,15 @@ fn finalize_deferred_submit(app: &mut App) {
 mod tests {
     use super::*;
     use crate::agent::model;
-    use crate::agent::wire::BridgeCommand;
+    use crate::agent::forge_sdk_bridge::ForgeSdkCommand;
     use crate::app::{MessageBlock, MessageRole};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
     fn app_with_connection()
-    -> (App, tokio::sync::mpsc::UnboundedReceiver<crate::agent::wire::CommandEnvelope>) {
+    -> (App, tokio::sync::mpsc::UnboundedReceiver<crate::agent::forge_sdk_bridge::ForgeSdkCommand>) {
         let mut app = App::test_default();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        app.conn = Some(std::rc::Rc::new(crate::agent::client::AgentConnection::new(tx)));
+        app.conn = Some(std::rc::Rc::new(crate::agent::forge_sdk_bridge::ForgeSdkBridge::new(tx)));
         app.session_id = Some(model::SessionId::new("session-1"));
         (app, rx)
     }
@@ -694,8 +694,8 @@ mod tests {
         ));
         let envelope = rx.try_recv().expect("prompt command should be sent");
         assert!(matches!(
-            envelope.command,
-            BridgeCommand::Prompt { session_id, .. } if session_id == "session-1"
+            envelope,
+            ForgeSdkCommand::Prompt { session_id, .. } if session_id == "session-1"
         ));
     }
 
@@ -723,8 +723,8 @@ mod tests {
         ));
         let envelope = rx.try_recv().expect("prompt command should be sent");
         assert!(matches!(
-            envelope.command,
-            BridgeCommand::Prompt { session_id, .. } if session_id == "session-1"
+            envelope,
+            ForgeSdkCommand::Prompt { session_id, .. } if session_id == "session-1"
         ));
     }
 
@@ -757,8 +757,8 @@ mod tests {
         ));
         let envelope = rx.try_recv().expect("prompt command should be sent");
         assert!(matches!(
-            envelope.command,
-            BridgeCommand::Prompt { session_id, .. } if session_id == "session-1"
+            envelope,
+            ForgeSdkCommand::Prompt { session_id, .. } if session_id == "session-1"
         ));
     }
 

@@ -96,8 +96,7 @@ fn is_ctrl(key: KeyEvent, ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::handle_key;
-    use crate::agent::client::AgentConnection;
-    use crate::agent::wire::{BridgeCommand, CommandEnvelope};
+    use crate::agent::forge_sdk_bridge::{ForgeSdkBridge, ForgeSdkCommand};
     use crate::app::{ActiveView, App, AppStatus, RecentSessionInfo};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::rc::Rc;
@@ -157,21 +156,19 @@ mod tests {
     #[test]
     fn enter_triggers_resume() {
         let mut app = picker_app();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CommandEnvelope>();
-        app.conn = Some(Rc::new(AgentConnection::new(tx)));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ForgeSdkCommand>();
+        app.conn = Some(Rc::new(ForgeSdkBridge::new(tx)));
 
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert_eq!(app.active_view, ActiveView::Chat);
         assert!(matches!(app.status, AppStatus::CommandPending));
         assert_eq!(app.resuming_session_id.as_deref(), Some("session-1"));
-        let envelope = rx.try_recv().expect("resume command");
+        let cmd = rx.try_recv().expect("resume command");
         assert!(matches!(
-            envelope.command,
-            BridgeCommand::ResumeSession {
-                session_id,
-                ..
-            } if session_id == "session-1"
+            cmd,
+            ForgeSdkCommand::ResumeSession { session_id, .. }
+                if session_id == "session-1"
         ));
     }
 
@@ -188,9 +185,9 @@ mod tests {
     #[test]
     fn failed_resume_restores_ready_state_and_surfaces_error() {
         let mut app = picker_app();
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<CommandEnvelope>();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ForgeSdkCommand>();
         drop(rx);
-        app.conn = Some(Rc::new(AgentConnection::new(tx)));
+        app.conn = Some(Rc::new(ForgeSdkBridge::new(tx)));
 
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 

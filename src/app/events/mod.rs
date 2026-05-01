@@ -865,10 +865,10 @@ mod tests {
     }
 
     fn app_with_bridge_connection()
-    -> (App, tokio::sync::mpsc::UnboundedReceiver<crate::agent::wire::CommandEnvelope>) {
+    -> (App, tokio::sync::mpsc::UnboundedReceiver<crate::agent::forge_sdk_bridge::ForgeSdkCommand>) {
         let mut app = make_test_app();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        app.conn = Some(Rc::new(crate::agent::client::AgentConnection::new(tx)));
+        app.conn = Some(Rc::new(crate::agent::forge_sdk_bridge::ForgeSdkBridge::new(tx)));
         (app, rx)
     }
 
@@ -1467,8 +1467,8 @@ mod tests {
 
         let envelope = rx.try_recv().expect("mcp snapshot command");
         assert_eq!(
-            envelope.command,
-            crate::agent::wire::BridgeCommand::GetMcpSnapshot {
+            envelope,
+            crate::agent::forge_sdk_bridge::ForgeSdkCommand::GetMcpSnapshot {
                 session_id: "test-session".to_owned(),
             }
         );
@@ -1869,8 +1869,8 @@ mod tests {
 
         let envelope = rx.try_recv().expect("mcp snapshot command");
         assert_eq!(
-            envelope.command,
-            crate::agent::wire::BridgeCommand::GetMcpSnapshot {
+            envelope,
+            crate::agent::forge_sdk_bridge::ForgeSdkCommand::GetMcpSnapshot {
                 session_id: "replacement".to_owned(),
             }
         );
@@ -1886,15 +1886,15 @@ mod tests {
 
         let mcp = rx.try_recv().expect("mcp snapshot command");
         assert_eq!(
-            mcp.command,
-            crate::agent::wire::BridgeCommand::GetMcpSnapshot {
+            mcp,
+            crate::agent::forge_sdk_bridge::ForgeSdkCommand::GetMcpSnapshot {
                 session_id: "test-session".to_owned(),
             }
         );
         let status = rx.try_recv().expect("status snapshot command");
         assert_eq!(
-            status.command,
-            crate::agent::wire::BridgeCommand::GetStatusSnapshot {
+            status,
+            crate::agent::forge_sdk_bridge::ForgeSdkCommand::GetStatusSnapshot {
                 session_id: "test-session".to_owned(),
             }
         );
@@ -2212,7 +2212,7 @@ mod tests {
         assert!(!app.startup_session_picker_resolved);
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        app.conn = Some(Rc::new(crate::agent::client::AgentConnection::new(tx)));
+        app.conn = Some(Rc::new(crate::agent::forge_sdk_bridge::ForgeSdkBridge::new(tx)));
         handle_client_event(&mut app, connected_event("claude-updated"));
 
         assert_eq!(app.active_view, ActiveView::SessionPicker);
@@ -2224,7 +2224,7 @@ mod tests {
         let mut app = make_test_app();
         app.startup_session_picker_requested = true;
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        app.conn = Some(Rc::new(crate::agent::client::AgentConnection::new(tx)));
+        app.conn = Some(Rc::new(crate::agent::forge_sdk_bridge::ForgeSdkBridge::new(tx)));
 
         handle_client_event(&mut app, connected_event("claude-updated"));
         assert_eq!(app.active_view, ActiveView::Chat);
@@ -4384,8 +4384,8 @@ mod tests {
         assert_eq!(app.pending_cancel_origin, Some(CancelOrigin::Manual));
         let envelope = rx.try_recv().expect("second Esc should send turn cancel");
         assert!(matches!(
-            envelope.command,
-            crate::agent::wire::BridgeCommand::CancelTurn { session_id }
+            envelope,
+            crate::agent::forge_sdk_bridge::ForgeSdkCommand::Cancel { session_id }
                 if session_id == "session-1"
         ));
     }
