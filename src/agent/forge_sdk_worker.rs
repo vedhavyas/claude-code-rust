@@ -294,23 +294,57 @@ async fn spawn_or_replace(
     let reader_event_tx = event_tx.clone();
     tokio::spawn(reader_loop(reader_client, reader_event_tx));
 
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.into_os_string().into_string().ok())
+        .unwrap_or_default();
+
     // Emit a placeholder Connected event so the TUI can transition
     // out of the connecting state. CurrentModel/cwd/mode get refined
     // by the SDK's `system/init` message hitting the reader.
     let _ = event_tx.send(BridgeEvent::Connected {
         session_id: session_id.clone(),
-        cwd: std::env::current_dir()
-            .ok()
-            .and_then(|p| p.into_os_string().into_string().ok())
-            .unwrap_or_default(),
+        cwd: cwd.clone(),
         current_model: placeholder_current_model(),
         available_models: Vec::new(),
         mode: None,
         history_updates: None,
     });
 
+    // Emit the recent-sessions list. The session picker (and slash-
+    // command autocomplete) wait on this event before becoming
+    // interactive — without it `claude-rs resume` hangs at "Loading
+    // recent sessions..." forever.
+    let _ = event_tx.send(BridgeEvent::SessionsListed {
+        sessions: list_recent_sessions(&cwd),
+    });
+
     *state = WorkerState::Running { client, session_id };
     Ok(())
+}
+
+/// Scan the on-disk JSONL transcripts for `cwd` and convert them into
+/// the TUI's `SessionListEntry` shape. Mirrors what the upstream Node
+/// bridge's `emitSessionsList` did via the JS SDK's `listSessions`.
+fn list_recent_sessions(cwd: &str) -> Vec<crate::agent::types::SessionListEntry> {
+    use crate::agent::types::SessionListEntry;
+
+    const MAX_RECENT: usize = 50;
+
+    let dir = if cwd.is_empty() { None } else { Some(cwd.to_owned()) };
+    forge_sdk::session::scan::list_sessions(dir, Some(MAX_RECENT), 0)
+        .into_iter()
+        .map(|info| SessionListEntry {
+            session_id: info.session_id,
+            summary: info.summary,
+            last_modified_ms: info.last_modified,
+            file_size_bytes: info.file_size.unwrap_or(0),
+            cwd: info.cwd,
+            git_branch: info.git_branch,
+            custom_title: info.custom_title,
+            first_prompt: info.first_prompt,
+        })
+        .collect()
 }
 
 async fn reader_loop(client: Client, event_tx: mpsc::UnboundedSender<BridgeEvent>) {
