@@ -276,10 +276,15 @@ fn handle_system_init(
     refresh_supported_modes_for_session(session);
     emit_fast_mode_update_if_changed(session, msg_record.get("fast_mode_state"), out);
 
-    if !session.connected {
-        // Initial Connected was already emitted at spawn — don't
-        // double-emit. Just fire the model/mode follow-ups so the bar
-        // refreshes.
+    // The initial Connected event was already emitted at spawn (the
+    // worker sets session.connected = true there). When system/init
+    // lands later — which happens once the user sends their first
+    // message — fire the model/mode follow-ups so the footer chip
+    // refreshes from "Opus [1M]" (resolved off the alias) to
+    // "Claude Opus 4.7" (resolved off the full id the CLI just sent).
+    // Mirrors upstream's `if (session.connected) { emitCurrentModelUpdate(...) }`
+    // branch in bridge.ts's handleSdkMessage.
+    if session.connected {
         if current_model_changed
             && let Some(cm) = session.current_model.clone()
         {
