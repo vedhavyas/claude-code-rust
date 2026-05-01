@@ -42,6 +42,7 @@ use forge_sdk::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+use crate::agent::bridge::{commands as bridge_commands, session_lifecycle, state as bridge_state};
 use crate::agent::forge_sdk_bridge::ForgeSdkCommand;
 use crate::agent::forge_sdk_translate::translate_message;
 use crate::agent::wire::BridgeEvent;
@@ -308,14 +309,41 @@ async fn spawn_or_replace(
 
     // Build the typed envelope from the SDK's cached init data + the
     // initialize control_response. Both are populated by `Client::spawn`
-    // so they are present here. We mirror what the upstream Node bridge
-    // packed into the `connected` event so the TUI's bottom bar
-    // (current model, available models, mode) renders correctly.
+    // so they are present here. The bridge module mirrors upstream's
+    // bridge.ts logic so the TUI's bottom bar renders identically.
     let server_info = client.get_server_info().cloned();
     let init_data = client.initial_session_data().cloned();
-    let available_models = build_available_models(server_info.as_ref());
-    let current_model = build_current_model(init_data.as_ref(), &available_models);
-    let mode = build_mode_state(init_data.as_ref(), &current_model);
+
+    let available_models = session_lifecycle::map_available_models(
+        server_info.as_ref().and_then(|v| v.get("models")),
+    );
+    let init_record = init_data.as_ref().and_then(serde_json::Value::as_object);
+    let init_model_id = init_record
+        .and_then(|r| r.get("model"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let init_permission_mode = init_record
+        .and_then(|r| r.get("permissionMode"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(bridge_state::PermissionMode::from_wire);
+    let supports_bypass = init_record
+        .and_then(|r| r.get("supportsBypassPermissionsMode"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    // Build a temporary bridge session so resolve_current_model and
+    // build_mode_state see the right inputs. The persistent session
+    // store comes in Stage 3 when we move dispatch into the bridge.
+    let mut bs = bridge_state::BridgeSession::new(session_id.clone(), cwd.clone());
+    bs.model_id = init_model_id;
+    bs.available_models.clone_from(&available_models);
+    bs.mode = init_permission_mode;
+    bs.supports_bypass_permissions_mode = supports_bypass;
+    let current_model = session_lifecycle::resolve_current_model(&bs);
+    bs.current_model = Some(current_model.clone());
+    bridge_commands::refresh_supported_modes_for_session(&mut bs);
+    let mode = init_permission_mode.map(|m| bridge_commands::build_mode_state(&bs, m));
 
     // History is loaded from the on-disk JSONL when resuming. The CLI
     // emits new turns as fresh stream-json frames, so we only need to
@@ -355,221 +383,6 @@ async fn spawn_or_replace(
 
     *state = WorkerState::Running { client, session_id };
     Ok(())
-}
-
-/// Convert the CLI's initialize-response `models` array into typed
-/// `AvailableModel`s. The CLI uses camelCase keys (`displayName`,
-/// `supportsEffort`, …) and the entry id lives under `value`, so we
-/// walk the JSON manually rather than serde-deriving with renames.
-/// Entries without a non-empty `value` and `displayName` are dropped,
-/// matching `mapAvailableModels` in upstream's bridge.
-fn build_available_models(
-    server_info: Option<&serde_json::Value>,
-) -> Vec<crate::agent::types::AvailableModel> {
-    use crate::agent::types::{AvailableModel, EffortLevel};
-
-    let Some(models) = server_info.and_then(|v| v.get("models")).and_then(|v| v.as_array()) else {
-        return Vec::new();
-    };
-
-    models
-        .iter()
-        .filter_map(|entry| {
-            let id = entry.get("value").and_then(|v| v.as_str())?.trim().to_owned();
-            if id.is_empty() {
-                return None;
-            }
-            let display_name = entry
-                .get("displayName")
-                .and_then(|v| v.as_str())?
-                .trim()
-                .to_owned();
-            if display_name.is_empty() {
-                return None;
-            }
-            let supported_effort_levels = entry
-                .get("supportedEffortLevels")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|level| match level.as_str()? {
-                            "low" => Some(EffortLevel::Low),
-                            "medium" => Some(EffortLevel::Medium),
-                            "high" => Some(EffortLevel::High),
-                            _ => None,
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            Some(AvailableModel {
-                id,
-                display_name,
-                description: entry
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned),
-                supports_effort: entry
-                    .get("supportsEffort")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false),
-                supported_effort_levels,
-                supports_adaptive_thinking: entry
-                    .get("supportsAdaptiveThinking")
-                    .and_then(serde_json::Value::as_bool),
-                supports_fast_mode: entry
-                    .get("supportsFastMode")
-                    .and_then(serde_json::Value::as_bool),
-                supports_auto_mode: entry
-                    .get("supportsAutoMode")
-                    .and_then(serde_json::Value::as_bool),
-            })
-        })
-        .collect()
-}
-
-/// Build a `CurrentModel` from the cached system/init payload. The
-/// init data carries the resolved model id under `model`; we look it
-/// up in `available_models` for the catalog metadata. When the lookup
-/// misses we still emit a minimal `CurrentModel` so the bottom bar at
-/// least shows the resolved id. Mirrors upstream's `resolveCurrentModel`.
-fn build_current_model(
-    init_data: Option<&serde_json::Value>,
-    available_models: &[crate::agent::types::AvailableModel],
-) -> crate::agent::types::CurrentModel {
-    use crate::agent::types::CurrentModel;
-
-    let resolved_id = init_data
-        .and_then(|v| v.get("model"))
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_owned();
-    let catalog = available_models.iter().find(|m| m.id == resolved_id);
-    let display_name_short = catalog.map_or_else(
-        || short_display_name_for_model_id(&resolved_id),
-        |m| m.display_name.clone(),
-    );
-    let display_name_long = humanize_model_id(&resolved_id);
-    CurrentModel {
-        requested_id: None,
-        resolved_id: resolved_id.clone(),
-        display_name_short,
-        display_name_long,
-        catalog_id: catalog.map(|m| m.id.clone()),
-        supports_effort: catalog.is_some_and(|m| m.supports_effort),
-        supported_effort_levels: catalog.map_or_else(Vec::new, |m| m.supported_effort_levels.clone()),
-        supports_fast_mode: catalog.and_then(|m| m.supports_fast_mode),
-        supports_auto_mode: catalog.and_then(|m| m.supports_auto_mode),
-        supports_adaptive_thinking: catalog.and_then(|m| m.supports_adaptive_thinking),
-        is_authoritative: !resolved_id.trim().is_empty(),
-    }
-}
-
-/// Build a `ModeState` from the cached system/init payload. Mirrors
-/// upstream's `BASE_SUPPORTED_MODE_IDS` + `currentModelSupportsAutoMode`
-/// + `supportsBypassPermissionsMode` selection.
-fn build_mode_state(
-    init_data: Option<&serde_json::Value>,
-    current_model: &crate::agent::types::CurrentModel,
-) -> Option<crate::agent::types::ModeState> {
-    use crate::agent::types::{ModeInfo, ModeState};
-
-    let mode_id = init_data
-        .and_then(|v| v.get("permissionMode"))
-        .and_then(|v| v.as_str())?
-        .to_owned();
-
-    // Base set: default / acceptEdits / plan / dontAsk. Add `auto`
-    // when the current model advertises it; add `bypassPermissions`
-    // when system/init says the runtime allows it.
-    let mut ids: Vec<&str> = vec!["default", "acceptEdits", "plan", "dontAsk"];
-    if current_model.supports_auto_mode == Some(true) {
-        ids.push("auto");
-    }
-    let supports_bypass = init_data
-        .and_then(|v| v.get("supportsBypassPermissionsMode"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    if supports_bypass {
-        ids.push("bypassPermissions");
-    }
-    if !ids.iter().any(|id| *id == mode_id) {
-        ids.push(mode_id.as_str());
-    }
-
-    Some(ModeState {
-        current_mode_id: mode_id.clone(),
-        current_mode_name: mode_display_name(&mode_id).to_owned(),
-        available_modes: ids
-            .into_iter()
-            .map(|id| ModeInfo {
-                id: id.to_owned(),
-                name: mode_display_name(id).to_owned(),
-                description: None,
-            })
-            .collect(),
-    })
-}
-
-fn mode_display_name(id: &str) -> &'static str {
-    match id {
-        "acceptEdits" => "Accept Edits",
-        "plan" => "Plan",
-        "bypassPermissions" => "Bypass Permissions",
-        "dontAsk" => "Don't Ask",
-        "auto" => "Auto",
-        _ => "Default",
-    }
-}
-
-/// Split `claude-sonnet-4-6[1m]` into family / version / context for
-/// display. Mirrors upstream's `normalizeModelKey`. Returns the raw id
-/// when the family isn't recognised so unknown CLI builds still
-/// surface something readable.
-fn humanize_model_id(id: &str) -> String {
-    format_model_id(id, /* short = */ false)
-}
-
-fn short_display_name_for_model_id(id: &str) -> String {
-    format_model_id(id, /* short = */ true)
-}
-
-fn format_model_id(id: &str, _short: bool) -> String {
-    // Today the upstream short and long formatters produce identical
-    // output (both call into `humanize`). Keep one implementation;
-    // switch the boolean if we later port the divergent shorthand.
-    let original = id.trim();
-    if original.is_empty() {
-        return String::new();
-    }
-    let lower = original.to_ascii_lowercase();
-    let (without_context, context_suffix) = match lower.rfind('[') {
-        Some(open) if lower.ends_with(']') => {
-            let suffix = &lower[open + 1..lower.len() - 1];
-            (&lower[..open], Some(suffix))
-        }
-        _ => (lower.as_str(), None),
-    };
-    let trimmed = without_context.strip_prefix("claude-").unwrap_or(without_context);
-    let mut parts = trimmed.split('-').filter(|p| !p.is_empty());
-    let family_part = parts.next().unwrap_or("");
-    let family_label = match family_part {
-        "opus" => "Opus",
-        "sonnet" => "Sonnet",
-        "haiku" => "Haiku",
-        _ => return original.to_owned(),
-    };
-    let version_parts: Vec<&str> = parts.take_while(|p| p.chars().all(|c| c.is_ascii_digit())).collect();
-    let version_label = if version_parts.is_empty() {
-        String::new()
-    } else {
-        format!(" {}", version_parts.join("."))
-    };
-    let context_label = match context_suffix {
-        Some(s) if s.eq_ignore_ascii_case("1m") => " [1M]".to_owned(),
-        Some(s) => format!(" [{s}]"),
-        None => String::new(),
-    };
-    format!("{family_label}{version_label}{context_label}")
 }
 
 /// Load past messages from the on-disk transcript and convert them
