@@ -142,7 +142,16 @@ async fn dispatch(
                 pending_questions,
                 session_id_slot,
             );
-            spawn_or_replace(state, event_tx, options, session_id_slot, bridge_session, None).await
+            spawn_or_replace(
+                state,
+                event_tx,
+                options,
+                session_id_slot,
+                bridge_session,
+                &launch_settings,
+                None,
+            )
+            .await
         }
         C::ResumeSession { session_id, launch_settings } => {
             // Resume by passing the prior session id to the CLI. The
@@ -162,6 +171,7 @@ async fn dispatch(
                 options,
                 session_id_slot,
                 bridge_session,
+                &launch_settings,
                 Some(session_id),
             )
             .await
@@ -433,12 +443,14 @@ fn require_running<'a>(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn spawn_or_replace(
     state: &mut WorkerState,
     event_tx: &mpsc::UnboundedSender<BridgeEvent>,
     options: Options,
     session_id_slot: &Arc<Mutex<String>>,
     bridge_session: &Arc<Mutex<bridge_state::BridgeSession>>,
+    launch_settings: &crate::agent::wire::SessionLaunchSettings,
     resume_id: Option<String>,
 ) -> anyhow::Result<()> {
     // If we already have a client, drop it first so the existing
@@ -476,15 +488,40 @@ async fn spawn_or_replace(
         server_info.as_ref().and_then(|v| v.get("models")),
     );
     let init_record = init_data.as_ref().and_then(serde_json::Value::as_object);
+
+    // The CLI does NOT emit `system/init` until BOTH the initialize
+    // control_response AND a user message have landed (per forge-sdk's
+    // spawn_inner doc). So at this point `init_data` is almost always
+    // None. Fall back to the launch_settings the TUI handed us — the
+    // user's settings.json's `permissions.defaultMode` and `model`
+    // are the source of truth for the initial Connected envelope.
+    let launch_settings_record = launch_settings
+        .settings
+        .as_ref()
+        .and_then(serde_json::Value::as_object);
     let init_model_id = init_record
         .and_then(|r| r.get("model"))
         .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            launch_settings_record
+                .and_then(|r| r.get("model"))
+                .and_then(serde_json::Value::as_str)
+        })
         .unwrap_or("")
         .to_owned();
     let raw_permission_mode = init_record
         .and_then(|r| r.get("permissionMode"))
         .and_then(serde_json::Value::as_str)
-        .map(str::to_owned);
+        .map(str::to_owned)
+        .or_else(|| {
+            launch_settings_record
+                .and_then(|r| r.get("permissions"))
+                .and_then(serde_json::Value::as_object)
+                .and_then(|p| p.get("defaultMode"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        });
     let init_permission_mode = raw_permission_mode
         .as_deref()
         .and_then(bridge_state::PermissionMode::from_wire)
@@ -499,14 +536,14 @@ async fn spawn_or_replace(
     tracing::info!(
         target: crate::logging::targets::BRIDGE_LIFECYCLE,
         event_name = "forge_sdk_worker_init_data",
-        message = "captured init_data after Client::spawn",
+        message = "captured init_data after Client::spawn (with launch_settings fallback)",
         outcome = "info",
         session_id = %session_id,
         init_present = init_record.is_some(),
         init_keys = ?init_keys,
-        init_model_id = %init_model_id,
-        init_permission_mode_raw = raw_permission_mode.as_deref().unwrap_or("(none)"),
-        init_permission_mode_parsed = ?init_permission_mode.map(bridge_state::PermissionMode::as_wire),
+        resolved_model_id = %init_model_id,
+        resolved_permission_mode_raw = raw_permission_mode.as_deref().unwrap_or("(none)"),
+        resolved_permission_mode_parsed = ?init_permission_mode.map(bridge_state::PermissionMode::as_wire),
         supports_bypass,
         available_models_count = available_models.len(),
     );
