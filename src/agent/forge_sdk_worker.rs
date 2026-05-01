@@ -44,7 +44,6 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::agent::forge_sdk_bridge::ForgeSdkCommand;
 use crate::agent::forge_sdk_translate::translate_message;
-use crate::agent::types::CurrentModel;
 use crate::agent::wire::BridgeEvent;
 
 /// Pending permission/question responses keyed by `tool_use_id`.
@@ -119,7 +118,7 @@ async fn dispatch(
                 pending,
                 session_id_slot,
             );
-            spawn_or_replace(state, event_tx, options, session_id_slot).await
+            spawn_or_replace(state, event_tx, options, session_id_slot, None).await
         }
         C::ResumeSession { session_id, launch_settings: _ } => {
             // Resume by passing the prior session id to the CLI. The
@@ -131,7 +130,14 @@ async fn dispatch(
                 pending,
                 session_id_slot,
             );
-            spawn_or_replace(state, event_tx, options, session_id_slot).await
+            spawn_or_replace(
+                state,
+                event_tx,
+                options,
+                session_id_slot,
+                Some(session_id),
+            )
+            .await
         }
         C::Prompt { session_id: _, chunks } => {
             let client = require_running(state, "Prompt")?;
@@ -275,6 +281,7 @@ async fn spawn_or_replace(
     event_tx: &mpsc::UnboundedSender<BridgeEvent>,
     options: Options,
     session_id_slot: &Arc<Mutex<String>>,
+    resume_id: Option<String>,
 ) -> anyhow::Result<()> {
     // If we already have a client, drop it first so the existing
     // subprocess can shut down cleanly.
@@ -299,17 +306,44 @@ async fn spawn_or_replace(
         .and_then(|p| p.into_os_string().into_string().ok())
         .unwrap_or_default();
 
-    // Emit a placeholder Connected event so the TUI can transition
-    // out of the connecting state. CurrentModel/cwd/mode get refined
-    // by the SDK's `system/init` message hitting the reader.
+    // Build the typed envelope from the SDK's cached init data + the
+    // initialize control_response. Both are populated by `Client::spawn`
+    // so they are present here. We mirror what the upstream Node bridge
+    // packed into the `connected` event so the TUI's bottom bar
+    // (current model, available models, mode) renders correctly.
+    let server_info = client.get_server_info().cloned();
+    let init_data = client.initial_session_data().cloned();
+    let available_models = build_available_models(server_info.as_ref());
+    let current_model = build_current_model(init_data.as_ref(), &available_models);
+    let mode = build_mode_state(init_data.as_ref());
+
+    // History is loaded from the on-disk JSONL when resuming. The CLI
+    // emits new turns as fresh stream-json frames, so we only need to
+    // backfill the past turns once at connect time.
+    let history_updates = if let Some(prev_session_id) = resume_id.as_deref() {
+        let updates = load_history_updates(prev_session_id, &cwd);
+        if updates.is_empty() { None } else { Some(updates) }
+    } else {
+        None
+    };
+
     let _ = event_tx.send(BridgeEvent::Connected {
         session_id: session_id.clone(),
         cwd: cwd.clone(),
-        current_model: placeholder_current_model(),
-        available_models: Vec::new(),
-        mode: None,
-        history_updates: None,
+        current_model,
+        available_models,
+        mode,
+        history_updates,
     });
+
+    // Eagerly emit a status snapshot so the bottom bar fills in
+    // account / org / token-source without the TUI having to ask.
+    if let Some(account) = client.account_info() {
+        let _ = event_tx.send(BridgeEvent::StatusSnapshot {
+            session_id: session_id.clone(),
+            account: translate_account_info(account),
+        });
+    }
 
     // Emit the recent-sessions list. The session picker (and slash-
     // command autocomplete) wait on this event before becoming
@@ -321,6 +355,247 @@ async fn spawn_or_replace(
 
     *state = WorkerState::Running { client, session_id };
     Ok(())
+}
+
+/// Convert the CLI's initialize-response `models` array into typed
+/// `AvailableModel`s. The CLI uses camelCase keys (`displayName`,
+/// `supportsEffort`, …) and the entry id lives under `value`, so we
+/// walk the JSON manually rather than serde-deriving with renames.
+/// Entries without a non-empty `value` and `displayName` are dropped,
+/// matching `mapAvailableModels` in upstream's bridge.
+fn build_available_models(
+    server_info: Option<&serde_json::Value>,
+) -> Vec<crate::agent::types::AvailableModel> {
+    use crate::agent::types::{AvailableModel, EffortLevel};
+
+    let Some(models) = server_info.and_then(|v| v.get("models")).and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+
+    models
+        .iter()
+        .filter_map(|entry| {
+            let id = entry.get("value").and_then(|v| v.as_str())?.trim().to_owned();
+            if id.is_empty() {
+                return None;
+            }
+            let display_name = entry
+                .get("displayName")
+                .and_then(|v| v.as_str())?
+                .trim()
+                .to_owned();
+            if display_name.is_empty() {
+                return None;
+            }
+            let supported_effort_levels = entry
+                .get("supportedEffortLevels")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|level| match level.as_str()? {
+                            "low" => Some(EffortLevel::Low),
+                            "medium" => Some(EffortLevel::Medium),
+                            "high" => Some(EffortLevel::High),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(AvailableModel {
+                id,
+                display_name,
+                description: entry
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                supports_effort: entry
+                    .get("supportsEffort")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                supported_effort_levels,
+                supports_adaptive_thinking: entry
+                    .get("supportsAdaptiveThinking")
+                    .and_then(serde_json::Value::as_bool),
+                supports_fast_mode: entry
+                    .get("supportsFastMode")
+                    .and_then(serde_json::Value::as_bool),
+                supports_auto_mode: entry
+                    .get("supportsAutoMode")
+                    .and_then(serde_json::Value::as_bool),
+            })
+        })
+        .collect()
+}
+
+/// Build a `CurrentModel` from the cached system/init payload. The
+/// init data carries the resolved model id under `model`; we look it
+/// up in `available_models` for the catalog metadata. When the lookup
+/// misses we still emit a minimal `CurrentModel` so the bottom bar at
+/// least shows the resolved id.
+fn build_current_model(
+    init_data: Option<&serde_json::Value>,
+    available_models: &[crate::agent::types::AvailableModel],
+) -> crate::agent::types::CurrentModel {
+    use crate::agent::types::CurrentModel;
+
+    let resolved_id = init_data
+        .and_then(|v| v.get("model"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_owned();
+    let catalog = available_models.iter().find(|m| m.id == resolved_id);
+    let display_name = catalog.map_or_else(|| resolved_id.clone(), |m| m.display_name.clone());
+    CurrentModel {
+        requested_id: None,
+        resolved_id,
+        display_name_short: display_name.clone(),
+        display_name_long: display_name,
+        catalog_id: catalog.map(|m| m.id.clone()),
+        supports_effort: catalog.is_some_and(|m| m.supports_effort),
+        supported_effort_levels: catalog.map_or_else(Vec::new, |m| m.supported_effort_levels.clone()),
+        supports_fast_mode: catalog.and_then(|m| m.supports_fast_mode),
+        supports_auto_mode: catalog.and_then(|m| m.supports_auto_mode),
+        supports_adaptive_thinking: catalog.and_then(|m| m.supports_adaptive_thinking),
+        is_authoritative: catalog.is_some(),
+    }
+}
+
+/// Build a `ModeState` from the cached system/init payload. The CLI's
+/// `permissionMode` field maps to `current_mode_id`. When missing we
+/// return `None` so the bottom bar's mode chip stays neutral.
+fn build_mode_state(
+    init_data: Option<&serde_json::Value>,
+) -> Option<crate::agent::types::ModeState> {
+    use crate::agent::types::{ModeInfo, ModeState};
+
+    let mode_id = init_data
+        .and_then(|v| v.get("permissionMode"))
+        .and_then(|v| v.as_str())?
+        .to_owned();
+    let display = mode_display_name(&mode_id);
+    Some(ModeState {
+        current_mode_id: mode_id.clone(),
+        current_mode_name: display.to_owned(),
+        available_modes: ["default", "acceptEdits", "plan", "bypassPermissions"]
+            .iter()
+            .map(|id| ModeInfo {
+                id: (*id).to_owned(),
+                name: mode_display_name(id).to_owned(),
+                description: None,
+            })
+            .collect(),
+    })
+}
+
+fn mode_display_name(id: &str) -> &'static str {
+    match id {
+        "acceptEdits" => "Accept edits",
+        "plan" => "Plan",
+        "bypassPermissions" => "Bypass permissions",
+        _ => "Default",
+    }
+}
+
+/// Load past messages from the on-disk transcript and convert them
+/// into the `SessionUpdate` stream the TUI's history renderer expects.
+/// The CLI itself replays nothing on resume — it just attaches the
+/// session to the existing JSONL — so the TUI side has to backfill.
+fn load_history_updates(
+    prev_session_id: &str,
+    cwd: &str,
+) -> Vec<crate::agent::types::SessionUpdate> {
+    let dir = if cwd.is_empty() { None } else { Some(cwd.to_owned()) };
+    let messages = forge_sdk::session::scan::get_session_messages(prev_session_id, dir);
+    let mut out = Vec::with_capacity(messages.len());
+    for msg in messages {
+        let role = msg.message.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        let Some(content) = msg.message.get("content") else {
+            continue;
+        };
+        match role {
+            "user" => append_user_history(&mut out, content),
+            "assistant" => append_assistant_history(&mut out, content),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn append_user_history(out: &mut Vec<crate::agent::types::SessionUpdate>, content: &serde_json::Value) {
+    use crate::agent::types::{ContentBlock, SessionUpdate};
+    if let Some(text) = content.as_str() {
+        out.push(SessionUpdate::UserMessageChunk {
+            content: ContentBlock::Text { text: text.to_owned() },
+        });
+        return;
+    }
+    let Some(blocks) = content.as_array() else { return };
+    for block in blocks {
+        let Some(kind) = block.get("type").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if kind == "text"
+            && let Some(text) = block.get("text").and_then(|v| v.as_str())
+        {
+            out.push(SessionUpdate::UserMessageChunk {
+                content: ContentBlock::Text { text: text.to_owned() },
+            });
+        }
+        // tool_result, image, etc. are dropped here -- the TUI's tool
+        // renderer pairs results with their original ToolCall and the
+        // raw API tool_result block doesn't carry enough info to
+        // reconstruct that pairing without more bookkeeping.
+    }
+}
+
+fn append_assistant_history(
+    out: &mut Vec<crate::agent::types::SessionUpdate>,
+    content: &serde_json::Value,
+) {
+    use crate::agent::types::{ContentBlock, SessionUpdate, ToolCall};
+    let Some(blocks) = content.as_array() else { return };
+    for block in blocks {
+        let Some(kind) = block.get("type").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        match kind {
+            "text" => {
+                if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+                    out.push(SessionUpdate::AgentMessageChunk {
+                        content: ContentBlock::Text { text: text.to_owned() },
+                    });
+                }
+            }
+            "thinking" => {
+                if let Some(text) = block.get("thinking").and_then(|v| v.as_str()) {
+                    out.push(SessionUpdate::AgentThoughtChunk {
+                        content: ContentBlock::Text { text: text.to_owned() },
+                    });
+                }
+            }
+            "tool_use" => {
+                let Some(id) = block.get("id").and_then(|v| v.as_str()) else { continue };
+                let Some(name) = block.get("name").and_then(|v| v.as_str()) else { continue };
+                out.push(SessionUpdate::ToolCall {
+                    tool_call: ToolCall {
+                        tool_call_id: id.to_owned(),
+                        title: name.to_owned(),
+                        kind: "execute".to_owned(),
+                        // History items are completed by definition.
+                        status: "completed".to_owned(),
+                        content: Vec::new(),
+                        raw_input: block.get("input").cloned(),
+                        raw_output: None,
+                        output_metadata: None,
+                        task_metadata: None,
+                        locations: Vec::new(),
+                        meta: None,
+                    },
+                });
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Scan the on-disk JSONL transcripts for `cwd` and convert them into
@@ -774,23 +1049,6 @@ fn clamp_percentage_to_u8(p: f64) -> u8 {
     n
 }
 
-fn placeholder_current_model() -> CurrentModel {
-    // Placeholder until the SDK's system/init message arrives via the
-    // reader and refines this through SessionUpdate::CurrentModelUpdate.
-    CurrentModel {
-        requested_id: None,
-        resolved_id: String::new(),
-        display_name_short: String::new(),
-        display_name_long: String::new(),
-        catalog_id: None,
-        supports_effort: false,
-        supported_effort_levels: Vec::new(),
-        supports_fast_mode: None,
-        supports_auto_mode: None,
-        supports_adaptive_thinking: None,
-        is_authoritative: false,
-    }
-}
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
