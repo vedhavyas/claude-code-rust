@@ -272,11 +272,23 @@ pub fn resolve_current_model(session: &BridgeSession) -> CurrentModel {
         resolved_id.as_str()
     };
 
+    // Prefer the catalogue's `display_name` when we matched against
+    // the initialize control_response — that's the human-friendly
+    // string the CLI ships (e.g. "Claude Opus 4.7"). Aliases like
+    // "opus[1m]" don't carry a version number, and the humanize
+    // fallback can only echo what's in the id, so the catalog
+    // lookup is the only path to a versioned display name on the
+    // initial Connected event (before system/init lands).
+    let display_name = catalog
+        .map(|m| m.display_name.clone())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| humanize_model_id(runtime_display_id));
+
     CurrentModel {
         requested_id: requested_id.map(str::to_owned),
         resolved_id: resolved_id.clone(),
-        display_name_short: short_display_name_for_model_id(runtime_display_id),
-        display_name_long: humanize_model_id(runtime_display_id),
+        display_name_short: display_name.clone(),
+        display_name_long: display_name,
         catalog_id: catalog.map(|m| m.id.clone()),
         supports_effort: catalog.is_some_and(|m| m.supports_effort),
         supported_effort_levels: catalog.map_or_else(Vec::new, |m| m.supported_effort_levels.clone()),
