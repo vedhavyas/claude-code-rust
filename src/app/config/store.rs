@@ -380,8 +380,18 @@ fn resolve_paths(
             .map_err(|err| format!("Failed to resolve current directory: {err}"))?
     };
 
+    // User settings live under <config_dir>, which honours
+    // $CLAUDE_CONFIG_DIR — delegate to forge-sdk so the env var is
+    // resolved in exactly one place. The home_override case (used by
+    // tests) bypasses the env var entirely.
+    let settings = if home_override.is_some() {
+        home.join(CLAUDE_DIR).join(SETTINGS_FILENAME)
+    } else {
+        forge_sdk::claude_config_dir().join(SETTINGS_FILENAME)
+    };
+
     Ok(SettingsPaths {
-        settings: home.join(CLAUDE_DIR).join(SETTINGS_FILENAME),
+        settings,
         local_settings: project_root.join(CLAUDE_DIR).join(LOCAL_SETTINGS_FILENAME),
         preferences: home.join(PREFERENCES_FILENAME),
     })
