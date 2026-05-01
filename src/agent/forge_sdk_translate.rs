@@ -55,6 +55,15 @@ pub fn translate_message(msg: SdkMessage) -> Vec<BridgeEvent> {
             };
             vec![event]
         }
+        SdkMessage::System {
+            subtype,
+            session_id,
+            data,
+        } if subtype == "elicitation_request" => {
+            elicitation_request_to_event(session_id.unwrap_or_default(), &data)
+                .into_iter()
+                .collect()
+        }
         _ => {
             tracing::debug!(
                 target: crate::logging::targets::BRIDGE_PROTOCOL,
@@ -63,6 +72,52 @@ pub fn translate_message(msg: SdkMessage) -> Vec<BridgeEvent> {
             Vec::new()
         }
     }
+}
+
+/// Translate a `system/elicitation_request` SDK message into the
+/// upstream `BridgeEvent::ElicitationRequest` shape so the MCP overlay
+/// in the TUI can prompt the user for the form payload.
+fn elicitation_request_to_event(
+    session_id: String,
+    data: &serde_json::Value,
+) -> Option<BridgeEvent> {
+    use crate::agent::types::{ElicitationMode, ElicitationRequest};
+    let request_id = data.get("request_id").and_then(|v| v.as_str())?.to_owned();
+    let server_name = data
+        .get("server_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let message = data
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let mode = match data.get("mode").and_then(|v| v.as_str()) {
+        Some("url") => ElicitationMode::Url,
+        _ => ElicitationMode::Form,
+    };
+    let url = data
+        .get("url")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let elicitation_id = data
+        .get("elicitation_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let requested_schema = data.get("requested_schema").cloned();
+    Some(BridgeEvent::ElicitationRequest {
+        session_id,
+        request: ElicitationRequest {
+            request_id,
+            server_name,
+            message,
+            mode,
+            url,
+            elicitation_id,
+            requested_schema,
+        },
+    })
 }
 
 fn assistant_to_events(session_id: &str, envelope: &AssistantEnvelope) -> Vec<BridgeEvent> {

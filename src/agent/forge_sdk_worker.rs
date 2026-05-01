@@ -21,14 +21,17 @@
 //!     running --(Cancel)--------> client.interrupt
 //!     running --(SetModel)------> client.set_model
 //!     running --(SetMode)-------> client.set_permission_mode
-//!     running --(other command)-> stub (logs warn, returns)
+//!     running --(MCP cmd)-------> client.mcp_*
+//!     running --(perm/question)-> drain pending oneshot
+//!     running --(elicitation)---> client.respond_to_elicitation
 //! ```
 //!
-//! Permission / question / elicitation response paths and most of the
-//! MCP-management surface are stubbed with TODO comments and land in
-//! follow-up commits. The four-gap items in forge-sdk
-//! (typed `account_info`, permission ctx display fields, MCP sampling
-//! status, elicitation) are flagged inline.
+//! Permission and question prompts arrive through the `can_use_tool`
+//! callback wired at `Client::spawn` time; the worker parks each
+//! request on a shared `pending` map keyed by `tool_use_id`, emits
+//! the matching `BridgeEvent`, and lets the inbound
+//! `PermissionResponse` / `QuestionResponse` command drain the
+//! oneshot when the user answers.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -158,13 +161,21 @@ async fn dispatch(
             deliver_question_response(pending, &tool_call_id, outcome);
             Ok(())
         }
-        C::RespondToElicitation { .. } => {
-            // forge-sdk gap: no elicitation callback yet. Stub until
-            // the SDK exposes a hook for the MCP elicitation flow.
-            tracing::warn!(
-                target: crate::logging::targets::BRIDGE_MCP,
-                "forge_sdk_worker: elicitation not yet supported in forge-sdk",
-            );
+        C::RespondToElicitation {
+            elicitation_request_id,
+            action,
+            content,
+            ..
+        } => {
+            let client = require_running(state, "RespondToElicitation")?;
+            let action_str = match action {
+                crate::agent::types::ElicitationAction::Accept => "accept",
+                crate::agent::types::ElicitationAction::Decline => "decline",
+                crate::agent::types::ElicitationAction::Cancel => "cancel",
+            };
+            client
+                .respond_to_elicitation(&elicitation_request_id, action_str, content)
+                .await?;
             Ok(())
         }
         C::GetStatusSnapshot { session_id } => {
@@ -199,19 +210,36 @@ async fn dispatch(
             let _ = event_tx.send(BridgeEvent::McpSnapshot { session_id, servers, error: None });
             Ok(())
         }
-        C::ReconnectMcpServer { .. }
-        | C::ToggleMcpServer { .. }
-        | C::SetMcpServers { .. }
-        | C::AuthenticateMcpServer { .. }
-        | C::ClearMcpAuth { .. }
-        | C::SubmitMcpOauthCallbackUrl { .. } => {
-            // MCP mutation commands land alongside the can_use_tool
-            // wiring; for now they're best-effort no-ops so the UI
-            // can degrade gracefully.
-            tracing::debug!(
-                target: crate::logging::targets::BRIDGE_MCP,
-                "forge_sdk_worker: MCP command stubbed for now",
-            );
+        C::ReconnectMcpServer { server_name, .. } => {
+            let client = require_running(state, "ReconnectMcpServer")?;
+            client.mcp_reconnect(&server_name).await?;
+            Ok(())
+        }
+        C::ToggleMcpServer { server_name, enabled, .. } => {
+            let client = require_running(state, "ToggleMcpServer")?;
+            client.mcp_toggle(&server_name, enabled).await?;
+            Ok(())
+        }
+        C::SetMcpServers { servers, .. } => {
+            let client = require_running(state, "SetMcpServers")?;
+            client.mcp_set_servers(serde_json::to_value(servers)?).await?;
+            Ok(())
+        }
+        C::AuthenticateMcpServer { server_name, .. } => {
+            let client = require_running(state, "AuthenticateMcpServer")?;
+            let _ = client.mcp_authenticate(&server_name).await?;
+            Ok(())
+        }
+        C::ClearMcpAuth { server_name, .. } => {
+            let client = require_running(state, "ClearMcpAuth")?;
+            client.mcp_clear_auth(&server_name).await?;
+            Ok(())
+        }
+        C::SubmitMcpOauthCallbackUrl { server_name, callback_url, .. } => {
+            let client = require_running(state, "SubmitMcpOauthCallbackUrl")?;
+            client
+                .mcp_oauth_callback_url(&server_name, &callback_url)
+                .await?;
             Ok(())
         }
         C::GenerateSessionTitle { session_id: _, description } => {
