@@ -479,10 +479,17 @@ async fn spawn_or_replace(
         .and_then(serde_json::Value::as_str)
         .unwrap_or("")
         .to_owned();
+    // Mirror upstream's `initialSessionMode(launchSettings)` default
+    // — bridge.ts seeds `session.mode = "default"` before system/init
+    // arrives and only swaps when init carries an explicit
+    // permissionMode. Falling through to None here was making the
+    // TUI footer's mode/model/effort chip strip disappear because
+    // `app.mode == None` short-circuits build_primary_line.
     let init_permission_mode = init_record
         .and_then(|r| r.get("permissionMode"))
         .and_then(serde_json::Value::as_str)
-        .and_then(bridge_state::PermissionMode::from_wire);
+        .and_then(bridge_state::PermissionMode::from_wire)
+        .or(Some(bridge_state::PermissionMode::Default));
     let supports_bypass = init_record
         .and_then(|r| r.get("supportsBypassPermissionsMode"))
         .and_then(serde_json::Value::as_bool)
