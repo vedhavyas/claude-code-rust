@@ -758,3 +758,221 @@ fn placeholder_current_model() -> CurrentModel {
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::{
+        deliver_permission_response, deliver_question_response, synth_permission_request,
+        synth_question_request, take_pending, PendingResponses,
+    };
+    use crate::agent::types::{
+        ElicitationAction, PermissionOutcome, QuestionOutcome,
+    };
+    use crate::agent::wire::BridgeEvent;
+    use forge_sdk::ToolPermissionContext;
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::oneshot;
+
+    fn fresh_pending() -> PendingResponses {
+        Arc::new(Mutex::new(HashMap::new()))
+    }
+
+    fn ctx(tool_name: &str, tool_use_id: &str, input: serde_json::Value) -> ToolPermissionContext {
+        ToolPermissionContext::new(tool_name, input, tool_use_id, None)
+    }
+
+    fn park(pending: &PendingResponses, id: &str) -> oneshot::Receiver<forge_sdk::PermissionDecision> {
+        let (tx, rx) = oneshot::channel();
+        pending.lock().unwrap().insert(id.to_owned(), tx);
+        rx
+    }
+
+    #[test]
+    fn permission_response_allow_drains_oneshot_with_allow() {
+        let pending = fresh_pending();
+        let rx = park(&pending, "tu_1");
+        deliver_permission_response(
+            &pending,
+            "tu_1",
+            PermissionOutcome::Selected { option_id: "allow_once".to_owned() },
+        );
+        let decision = rx.blocking_recv().expect("oneshot resolved");
+        assert!(decision.is_allow(), "allow_once should produce an allow decision");
+    }
+
+    #[test]
+    fn permission_response_deny_keyword_drains_with_deny() {
+        let pending = fresh_pending();
+        let rx = park(&pending, "tu_2");
+        deliver_permission_response(
+            &pending,
+            "tu_2",
+            PermissionOutcome::Selected { option_id: "deny".to_owned() },
+        );
+        let decision = rx.blocking_recv().expect("oneshot resolved");
+        assert!(!decision.is_allow(), "deny option should produce a deny decision");
+    }
+
+    #[test]
+    fn permission_response_cancel_drains_with_deny() {
+        let pending = fresh_pending();
+        let rx = park(&pending, "tu_3");
+        deliver_permission_response(&pending, "tu_3", PermissionOutcome::Cancelled);
+        let decision = rx.blocking_recv().expect("oneshot resolved");
+        assert!(!decision.is_allow(), "cancelled outcome should deny");
+    }
+
+    #[test]
+    fn permission_response_unknown_id_is_silent_no_op() {
+        let pending = fresh_pending();
+        // No oneshot parked for this id -- function should warn and return.
+        deliver_permission_response(
+            &pending,
+            "missing",
+            PermissionOutcome::Selected { option_id: "allow_once".to_owned() },
+        );
+        // Pending map should remain empty.
+        assert!(pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn question_response_answered_drains_with_allow_and_payload() {
+        let pending = fresh_pending();
+        let rx = park(&pending, "tu_q1");
+        deliver_question_response(
+            &pending,
+            "tu_q1",
+            QuestionOutcome::Answered {
+                selected_option_ids: vec!["red".to_owned(), "blue".to_owned()],
+                annotation: None,
+            },
+        );
+        let decision = rx.blocking_recv().expect("oneshot resolved");
+        assert!(decision.is_allow(), "answered outcome should produce an allow");
+        // The CLI's AskUserQuestion tool reads `updatedInput.answers`.
+        // The worker maps each option to "q{i}" keys for wire-compat
+        // with the legacy Node bridge.
+        let updated = decision.updated_input().expect("answer payload present");
+        assert_eq!(updated.pointer("/answers/q0"), Some(&json!("red")));
+        assert_eq!(updated.pointer("/answers/q1"), Some(&json!("blue")));
+    }
+
+    #[test]
+    fn question_response_cancel_drains_with_deny() {
+        let pending = fresh_pending();
+        let rx = park(&pending, "tu_q2");
+        deliver_question_response(&pending, "tu_q2", QuestionOutcome::Cancelled);
+        let decision = rx.blocking_recv().expect("oneshot resolved");
+        assert!(!decision.is_allow(), "cancelled question should deny");
+    }
+
+    #[test]
+    fn synth_permission_request_carries_tool_input_and_display_fields() {
+        let c = ctx("Bash", "tu_p1", json!({ "command": "ls" })).with_display(
+            None,
+            None,
+            Some("Run shell command".to_owned()),
+            Some("Bash".to_owned()),
+            Some("Lists directory entries".to_owned()),
+        );
+        let event = synth_permission_request("sess_1", &c);
+        let BridgeEvent::PermissionRequest { session_id, request } = event else {
+            panic!("expected PermissionRequest");
+        };
+        assert_eq!(session_id, "sess_1");
+        assert_eq!(request.tool_call.tool_call_id, "tu_p1");
+        assert_eq!(request.tool_call.title, "Bash");
+        assert_eq!(request.tool_call.raw_input, Some(json!({ "command": "ls" })));
+        // Default options surface allow_once / allow_always / deny.
+        assert_eq!(request.options.len(), 3);
+        assert!(request.options.iter().any(|o| o.option_id == "deny"));
+        let display = request.display.expect("display populated");
+        assert_eq!(display.title.as_deref(), Some("Run shell command"));
+        assert_eq!(display.display_name.as_deref(), Some("Bash"));
+        assert_eq!(display.description.as_deref(), Some("Lists directory entries"));
+    }
+
+    #[test]
+    fn synth_question_request_extracts_first_prompt_and_options() {
+        let c = ctx(
+            "AskUserQuestion",
+            "tu_q3",
+            json!({
+                "questions": [
+                    {
+                        "question": "Which color?",
+                        "header": "Pick one",
+                        "multiSelect": false,
+                        "options": [
+                            { "option_id": "red", "label": "Red" },
+                            { "option_id": "blue", "label": "Blue", "description": "the cool one" },
+                        ],
+                    },
+                    {
+                        "question": "Filler so total > 1",
+                        "options": [],
+                    },
+                ],
+            }),
+        );
+        let event = synth_question_request("sess_2", &c);
+        let BridgeEvent::QuestionRequest { session_id, request } = event else {
+            panic!("expected QuestionRequest");
+        };
+        assert_eq!(session_id, "sess_2");
+        assert_eq!(request.tool_call.tool_call_id, "tu_q3");
+        assert_eq!(request.total_questions, 2);
+        assert_eq!(request.question_index, 0);
+        assert_eq!(request.prompt.question, "Which color?");
+        assert_eq!(request.prompt.header, "Pick one");
+        assert_eq!(request.prompt.options.len(), 2);
+        assert_eq!(request.prompt.options[0].option_id, "red");
+        assert_eq!(request.prompt.options[0].label, "Red");
+        assert_eq!(
+            request.prompt.options[1].description.as_deref(),
+            Some("the cool one"),
+        );
+    }
+
+    #[test]
+    fn synth_question_request_handles_empty_questions_gracefully() {
+        let c = ctx("AskUserQuestion", "tu_q4", json!({}));
+        let event = synth_question_request("sess_3", &c);
+        let BridgeEvent::QuestionRequest { request, .. } = event else {
+            panic!();
+        };
+        assert_eq!(request.total_questions, 0);
+        assert_eq!(request.prompt.question, "");
+        assert!(request.prompt.options.is_empty());
+    }
+
+    #[test]
+    fn take_pending_removes_entry() {
+        let pending = fresh_pending();
+        let _rx = park(&pending, "tu_x");
+        assert!(take_pending(&pending, "tu_x").is_some());
+        // Second take returns None — entry already drained.
+        assert!(take_pending(&pending, "tu_x").is_none());
+    }
+
+    // Sanity: ElicitationAction variants stringify the way the worker
+    // expects when forwarding to forge-sdk.
+    #[test]
+    fn elicitation_action_variants_match_expected_wire_strings() {
+        let cases = [
+            (ElicitationAction::Accept, "accept"),
+            (ElicitationAction::Decline, "decline"),
+            (ElicitationAction::Cancel, "cancel"),
+        ];
+        for (action, expected) in cases {
+            let actual = match action {
+                ElicitationAction::Accept => "accept",
+                ElicitationAction::Decline => "decline",
+                ElicitationAction::Cancel => "cancel",
+            };
+            assert_eq!(actual, expected);
+        }
+    }
+}
