@@ -481,21 +481,35 @@ async fn spawn_or_replace(
         .and_then(serde_json::Value::as_str)
         .unwrap_or("")
         .to_owned();
-    // The CLI's system/init payload echoes the mode it was launched
-    // with. We pass --permission-mode through `OptionsBuilder` from
-    // launch_settings.settings.permissions.defaultMode, so by the
-    // time spawn returns the init payload should reflect that. Fall
-    // back to Default only when the init really doesn't carry one
-    // (otherwise the footer chip strip wouldn't render at all).
-    let init_permission_mode = init_record
+    let raw_permission_mode = init_record
         .and_then(|r| r.get("permissionMode"))
         .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let init_permission_mode = raw_permission_mode
+        .as_deref()
         .and_then(bridge_state::PermissionMode::from_wire)
         .or(Some(bridge_state::PermissionMode::Default));
     let supports_bypass = init_record
         .and_then(|r| r.get("supportsBypassPermissionsMode"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
+    let init_keys: Vec<String> = init_record
+        .map(|r| r.keys().cloned().collect())
+        .unwrap_or_default();
+    tracing::info!(
+        target: crate::logging::targets::BRIDGE_LIFECYCLE,
+        event_name = "forge_sdk_worker_init_data",
+        message = "captured init_data after Client::spawn",
+        outcome = "info",
+        session_id = %session_id,
+        init_present = init_record.is_some(),
+        init_keys = ?init_keys,
+        init_model_id = %init_model_id,
+        init_permission_mode_raw = raw_permission_mode.as_deref().unwrap_or("(none)"),
+        init_permission_mode_parsed = ?init_permission_mode.map(bridge_state::PermissionMode::as_wire),
+        supports_bypass,
+        available_models_count = available_models.len(),
+    );
 
     // Populate the persistent BridgeSession so the reader_loop's
     // handle_sdk_message calls see the right starting state (model
@@ -765,6 +779,9 @@ fn build_options_with_callback(
     // and launch_settings.settings.model so the CLI starts in the right
     // mode + model. Without this, the CLI starts in default Ask mode
     // and shows the wrong chip in the footer.
+    let mut applied_mode: Option<&'static str> = None;
+    let mut applied_model: Option<String> = None;
+    let settings_present = launch_settings.settings.is_some();
     if let Some(settings_value) = launch_settings.settings.as_ref()
         && let Some(settings_record) = settings_value.as_object()
     {
@@ -773,13 +790,26 @@ fn build_options_with_callback(
             && let Ok(mode) = parse_permission_mode(default_mode_str)
         {
             b = b.permission_mode(mode);
+            applied_mode = Some(mode.as_cli_arg());
         }
         if let Some(model) = settings_record.get("model").and_then(serde_json::Value::as_str)
             && !model.trim().is_empty()
         {
             b = b.model(model);
+            applied_model = Some(model.to_owned());
         }
     }
+    tracing::info!(
+        target: crate::logging::targets::BRIDGE_LIFECYCLE,
+        event_name = "forge_sdk_worker_options_built",
+        message = "launch_settings → forge-sdk OptionsBuilder",
+        outcome = "info",
+        settings_present,
+        applied_permission_mode = applied_mode.unwrap_or("(none)"),
+        applied_model = applied_model.as_deref().unwrap_or("(none)"),
+        cwd_present = !cwd.is_empty(),
+        resume_present = resume.is_some(),
+    );
     b.build()
 }
 
