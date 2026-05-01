@@ -1,13 +1,5 @@
-use crate::agent::types::OauthCredentialsInfo;
 use crate::app::{ExtraUsage, UsageSnapshot, UsageSourceKind, UsageWindow};
-use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
-use serde::Deserialize;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-const OAUTH_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
-const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
-const OAUTH_TIMEOUT: Duration = Duration::from_secs(8);
-const FALLBACK_USER_AGENT: &str = "claude-code/unknown";
 
 #[derive(Debug)]
 pub(super) enum OauthFetchError {
@@ -30,118 +22,46 @@ impl OauthFetchError {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct OAuthUsagePayload {
-    five_hour: Option<OAuthUsageWindowPayload>,
-    seven_day: Option<OAuthUsageWindowPayload>,
-    seven_day_oauth_apps: Option<OAuthUsageWindowPayload>,
-    seven_day_opus: Option<OAuthUsageWindowPayload>,
-    seven_day_sonnet: Option<OAuthUsageWindowPayload>,
-    iguana_necktie: Option<OAuthUsageWindowPayload>,
-    extra_usage: Option<OAuthExtraUsagePayload>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OAuthUsageWindowPayload {
-    utilization: Option<f64>,
-    resets_at: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OAuthExtraUsagePayload {
-    is_enabled: Option<bool>,
-    monthly_limit: Option<f64>,
-    used_credits: Option<f64>,
-    utilization: Option<f64>,
-    currency: Option<String>,
-}
-
-pub(super) async fn fetch_snapshot(
-    credentials: Option<OauthCredentialsInfo>,
-) -> Result<UsageSnapshot, OauthFetchError> {
-    let credentials = credentials.ok_or_else(|| {
-        OauthFetchError::Unavailable(
-            "No Claude OAuth credentials found. Run /login to authenticate.".to_owned(),
-        )
-    })?;
-
-    if credentials_expired(&credentials) {
-        return Err(OauthFetchError::Unavailable(
-            "Claude OAuth credentials expired. Run /login to refresh them.".to_owned(),
-        ));
-    }
-
-    let client = reqwest::Client::builder()
-        .timeout(OAUTH_TIMEOUT)
-        .default_headers(oauth_headers(&credentials.access_token)?)
-        .build()
-        .map_err(|error| {
-            OauthFetchError::Failed(format!("Failed to create OAuth client: {error}"))
-        })?;
-
-    let response =
-        client.get(OAUTH_USAGE_URL).send().await.map_err(|error| {
-            OauthFetchError::Failed(format!("Claude OAuth network error: {error}"))
-        })?;
-
-    let status = response.status();
-    let body = response.bytes().await.map_err(|error| {
-        OauthFetchError::Failed(format!("Failed to read Claude OAuth usage response: {error}"))
-    })?;
-
-    match status.as_u16() {
-        200 => decode_usage_payload(&body),
-        401 | 403 => Err(OauthFetchError::Unauthorized(
-            "Claude OAuth usage request was rejected. Run /login to refresh Claude credentials."
-                .to_owned(),
-        )),
-        _ => Err(OauthFetchError::Failed(format!(
-            "Claude OAuth usage request failed with HTTP {}{}",
-            status.as_u16(),
-            truncated_body_suffix(&body),
-        ))),
+impl From<forge_sdk::OauthUsageError> for OauthFetchError {
+    fn from(error: forge_sdk::OauthUsageError) -> Self {
+        use forge_sdk::OauthUsageError;
+        match error {
+            OauthUsageError::NoCredentials => Self::Unavailable(
+                "No Claude OAuth credentials found. Run /login to authenticate.".to_owned(),
+            ),
+            OauthUsageError::Expired => Self::Unavailable(
+                "Claude OAuth credentials expired. Run /login to refresh them.".to_owned(),
+            ),
+            OauthUsageError::Unauthorized(_) => Self::Unauthorized(
+                "Claude OAuth usage request was rejected. Run /login to refresh Claude credentials."
+                    .to_owned(),
+            ),
+            OauthUsageError::HttpStatus(status, suffix) => {
+                Self::Failed(format!("Claude OAuth usage request failed with HTTP {status}{suffix}"))
+            }
+            OauthUsageError::Network(message) => {
+                Self::Failed(format!("Claude OAuth network error: {message}"))
+            }
+            OauthUsageError::Decode(message) => {
+                Self::Failed(format!("Failed to decode Claude OAuth usage response: {message}"))
+            }
+            other => Self::Failed(format!("Claude OAuth usage failed: {other}")),
+        }
     }
 }
 
-fn credentials_expired(credentials: &OauthCredentialsInfo) -> bool {
-    let Some(expires_at_ms) = credentials.expires_at_ms else {
-        return false;
-    };
-    let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
-        return false;
-    };
-    let now_ms = u64::try_from(now.as_millis()).unwrap_or(u64::MAX);
-    now_ms >= expires_at_ms
+pub(super) async fn fetch_snapshot() -> Result<UsageSnapshot, OauthFetchError> {
+    let payload = forge_sdk::oauth_usage().await?;
+    map_usage_payload(payload)
 }
 
-fn oauth_headers(access_token: &str) -> Result<HeaderMap, OauthFetchError> {
-    let mut headers = HeaderMap::new();
-    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    headers.insert("anthropic-beta", HeaderValue::from_static(OAUTH_BETA_HEADER));
-    headers.insert(USER_AGENT, HeaderValue::from_static(FALLBACK_USER_AGENT));
-    let token = HeaderValue::from_str(&format!("Bearer {access_token}")).map_err(|error| {
-        OauthFetchError::Failed(format!("Invalid OAuth bearer token header: {error}"))
-    })?;
-    headers.insert(AUTHORIZATION, token);
-    Ok(headers)
-}
-
-fn decode_usage_payload(body: &[u8]) -> Result<UsageSnapshot, OauthFetchError> {
-    let payload = serde_json::from_slice::<OAuthUsagePayload>(body).map_err(|error| {
-        OauthFetchError::Failed(format!("Failed to decode Claude OAuth usage response: {error}"))
-    })?;
-
+fn map_usage_payload(payload: forge_sdk::OauthUsage) -> Result<UsageSnapshot, OauthFetchError> {
     let five_hour = map_window(payload.five_hour, "5-hour");
     if five_hour.is_none() {
         return Err(OauthFetchError::Failed(
             "Claude OAuth usage response did not include the current session window.".to_owned(),
         ));
     }
-
-    let _ = payload.seven_day_oauth_apps;
-    let _ = payload.iguana_necktie;
-
     Ok(UsageSnapshot {
         source: UsageSourceKind::Oauth,
         fetched_at: SystemTime::now(),
@@ -154,7 +74,7 @@ fn decode_usage_payload(body: &[u8]) -> Result<UsageSnapshot, OauthFetchError> {
 }
 
 fn map_window(
-    payload: Option<OAuthUsageWindowPayload>,
+    payload: Option<forge_sdk::OauthUsageWindow>,
     label: &'static str,
 ) -> Option<UsageWindow> {
     let payload = payload?;
@@ -167,34 +87,17 @@ fn map_window(
     })
 }
 
-fn map_extra_usage(payload: Option<OAuthExtraUsagePayload>) -> Option<ExtraUsage> {
+fn map_extra_usage(payload: Option<forge_sdk::OauthExtraUsage>) -> Option<ExtraUsage> {
     let payload = payload?;
     if payload.is_enabled == Some(false) {
         return None;
     }
-
     Some(ExtraUsage {
         monthly_limit: payload.monthly_limit.map(|value| value / 100.0),
         used_credits: payload.used_credits.map(|value| value / 100.0),
         utilization: payload.utilization.map(|value| value.clamp(0.0, 100.0)),
         currency: payload.currency,
     })
-}
-
-fn truncated_body_suffix(body: &[u8]) -> String {
-    let text = String::from_utf8_lossy(body).trim().replace('\n', " ");
-    if text.is_empty() {
-        return String::new();
-    }
-
-    let shortened = if text.chars().count() > 200 {
-        let mut out = text.chars().take(200).collect::<String>();
-        out.push_str("...");
-        out
-    } else {
-        text
-    };
-    format!(": {shortened}")
 }
 
 fn parse_timestamp_value(value: &serde_json::Value) -> Option<SystemTime> {
@@ -306,24 +209,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decodes_sparse_oauth_payload() {
-        let snapshot = decode_usage_payload(
+    fn maps_sparse_oauth_payload() {
+        let payload: forge_sdk::OauthUsage = serde_json::from_slice(
             br#"{
                 "five_hour": { "utilization": 12.5, "resets_at": "2025-12-25T12:00:00.000Z" },
                 "seven_day_sonnet": { "utilization": 5 },
                 "unknown_field": true
             }"#,
         )
-        .expect("snapshot");
-
+        .expect("decode");
+        let snapshot = map_usage_payload(payload).expect("snapshot");
         assert_eq!(snapshot.five_hour.as_ref().map(|window| window.utilization), Some(12.5));
         assert_eq!(snapshot.seven_day_sonnet.as_ref().map(|window| window.utilization), Some(5.0));
         assert!(snapshot.seven_day.is_none());
     }
 
     #[test]
-    fn decodes_extra_usage_amounts_in_major_units() {
-        let snapshot = decode_usage_payload(
+    fn maps_extra_usage_amounts_in_major_units() {
+        let payload: forge_sdk::OauthUsage = serde_json::from_slice(
             br#"{
                 "five_hour": { "utilization": 1, "resets_at": "2025-12-25T12:00:00.000Z" },
                 "extra_usage": {
@@ -335,8 +238,8 @@ mod tests {
                 }
             }"#,
         )
-        .expect("snapshot");
-
+        .expect("decode");
+        let snapshot = map_usage_payload(payload).expect("snapshot");
         let extra = snapshot.extra_usage.expect("extra usage");
         assert_eq!(extra.monthly_limit, Some(20.0));
         assert_eq!(extra.used_credits, Some(12.4));

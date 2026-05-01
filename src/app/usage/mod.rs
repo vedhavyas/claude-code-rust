@@ -33,11 +33,10 @@ pub(crate) fn request_refresh(app: &mut App) {
     let epoch = app.session_scope_epoch;
     let source_mode = app.usage.active_source;
     let cwd_raw = app.cwd_raw.clone();
-    let oauth_credentials = app.oauth_credentials.clone();
 
     tokio::task::spawn_local(async move {
         let _ = event_tx.send(ClientEvent::UsageRefreshStarted { epoch });
-        match refresh_snapshot(source_mode, cwd_raw, oauth_credentials).await {
+        match refresh_snapshot(source_mode, cwd_raw).await {
             Ok(snapshot) => {
                 let _ = event_tx.send(ClientEvent::UsageSnapshotReceived { epoch, snapshot });
             }
@@ -137,27 +136,21 @@ fn format_remaining_until(target: SystemTime) -> String {
 async fn refresh_snapshot(
     source_mode: UsageSourceMode,
     cwd_raw: String,
-    oauth_credentials: Option<crate::agent::types::OauthCredentialsInfo>,
 ) -> Result<UsageSnapshot, UsageRefreshFailure> {
     match source_mode {
-        UsageSourceMode::Oauth => {
-            oauth::fetch_snapshot(oauth_credentials).await.map_err(|error| UsageRefreshFailure {
-                source: UsageSourceKind::Oauth,
-                message: error.into_message(),
-            })
-        }
+        UsageSourceMode::Oauth => oauth::fetch_snapshot().await.map_err(|error| UsageRefreshFailure {
+            source: UsageSourceKind::Oauth,
+            message: error.into_message(),
+        }),
         UsageSourceMode::Cli => cli::fetch_snapshot(cwd_raw)
             .await
             .map_err(|message| UsageRefreshFailure { source: UsageSourceKind::Cli, message }),
-        UsageSourceMode::Auto => refresh_snapshot_auto(cwd_raw, oauth_credentials).await,
+        UsageSourceMode::Auto => refresh_snapshot_auto(cwd_raw).await,
     }
 }
 
-async fn refresh_snapshot_auto(
-    cwd_raw: String,
-    oauth_credentials: Option<crate::agent::types::OauthCredentialsInfo>,
-) -> Result<UsageSnapshot, UsageRefreshFailure> {
-    match oauth::fetch_snapshot(oauth_credentials).await {
+async fn refresh_snapshot_auto(cwd_raw: String) -> Result<UsageSnapshot, UsageRefreshFailure> {
+    match oauth::fetch_snapshot().await {
         Ok(snapshot) => Ok(snapshot),
         Err(error) if error.should_fallback_to_cli() => {
             let oauth_message = error.into_message();
