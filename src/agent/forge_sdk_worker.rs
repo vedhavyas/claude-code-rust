@@ -387,166 +387,35 @@ async fn spawn_or_replace(
 
 /// Load past messages from the on-disk transcript and convert them
 /// into the `SessionUpdate` stream the TUI's history renderer expects.
-/// The CLI itself replays nothing on resume — it just attaches the
-/// session to the existing JSONL — so the TUI side has to backfill.
-///
-/// Mirrors upstream's `mapSessionMessagesToUpdates`:
-/// - thinking blocks are skipped (resume noise; the in-flight stream
-///   carries them when they actually matter)
-/// - assistant `tool_use` blocks emit `ToolCall` updates and are tracked
-///   in a tool-id map
-/// - `tool_result` blocks (which can appear in either role's content)
-///   look up the tracked `ToolCall` and emit a `ToolCallUpdate` carrying
-///   the result fields
-/// - image blocks fall back to a `[image]` text placeholder
+/// Delegates to `bridge::history::map_session_messages_to_updates`
+/// which mirrors upstream's `mapSessionMessagesToUpdates` and uses the
+/// full `bridge::tooling::build_tool_result_fields` extractor for
+/// per-tool result formatting (Bash stdout/stderr, Edit/Write diffs,
+/// Read `file_unchanged` shortcut, Agent `agentType` title, etc.).
 fn load_history_updates(
     prev_session_id: &str,
     cwd: &str,
 ) -> Vec<crate::agent::types::SessionUpdate> {
-    use std::collections::HashMap;
-
     let dir = if cwd.is_empty() { None } else { Some(cwd.to_owned()) };
     let messages = forge_sdk::session::scan::get_session_messages(prev_session_id, dir);
-    let mut out: Vec<crate::agent::types::SessionUpdate> = Vec::with_capacity(messages.len());
-    let mut tool_calls: HashMap<String, crate::agent::types::ToolCall> = HashMap::new();
-
-    for msg in messages {
-        let role = msg.message.get("role").and_then(|v| v.as_str()).unwrap_or("");
-        let Some(content) = msg.message.get("content") else {
-            continue;
-        };
-        // Plain string content (older transcripts use this for user turns).
-        if let Some(text) = content.as_str() {
-            push_resume_text(&mut out, role, text);
-            continue;
-        }
-        let Some(blocks) = content.as_array() else { continue };
-        for block in blocks {
-            let kind = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            // Skip thinking blocks (matches upstream's resume behaviour
-            // — the live stream carries them when actually relevant)
-            // and unknown block types.
-            match kind {
-                "text" => {
-                    if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
-                        push_resume_text(&mut out, role, text);
-                    }
-                }
-                "tool_use" if role == "assistant" => {
-                    push_resume_tool_use(&mut out, &mut tool_calls, block);
-                }
-                "tool_result" | "server_tool_result" => {
-                    push_resume_tool_result(&mut out, &mut tool_calls, block);
-                }
-                "image" => {
-                    push_resume_text(&mut out, role, "[image]");
-                }
-                _ => {}
-            }
-        }
-    }
-    out
-}
-
-fn push_resume_text(
-    out: &mut Vec<crate::agent::types::SessionUpdate>,
-    role: &str,
-    text: &str,
-) {
-    use crate::agent::types::{ContentBlock, SessionUpdate};
-    if text.trim().is_empty() {
-        return;
-    }
-    let content = ContentBlock::Text { text: text.to_owned() };
-    out.push(if role == "assistant" {
-        SessionUpdate::AgentMessageChunk { content }
-    } else {
-        SessionUpdate::UserMessageChunk { content }
-    });
-}
-
-fn push_resume_tool_use(
-    out: &mut Vec<crate::agent::types::SessionUpdate>,
-    tool_calls: &mut std::collections::HashMap<String, crate::agent::types::ToolCall>,
-    block: &serde_json::Value,
-) {
-    use crate::agent::types::{SessionUpdate, ToolCall};
-    let Some(id) = block.get("id").and_then(|v| v.as_str()) else { return };
-    let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("Tool");
-    let tool_call = ToolCall {
-        tool_call_id: id.to_owned(),
-        title: name.to_owned(),
-        kind: "execute".to_owned(),
-        status: "in_progress".to_owned(),
-        content: Vec::new(),
-        raw_input: block.get("input").cloned(),
-        raw_output: None,
-        output_metadata: None,
-        task_metadata: None,
-        locations: Vec::new(),
-        meta: None,
-    };
-    tool_calls.insert(id.to_owned(), tool_call.clone());
-    out.push(SessionUpdate::ToolCall { tool_call });
-}
-
-fn push_resume_tool_result(
-    out: &mut Vec<crate::agent::types::SessionUpdate>,
-    tool_calls: &mut std::collections::HashMap<String, crate::agent::types::ToolCall>,
-    block: &serde_json::Value,
-) {
-    use crate::agent::types::{SessionUpdate, ToolCallUpdate, ToolCallUpdateFields};
-    let Some(tool_use_id) = block.get("tool_use_id").and_then(|v| v.as_str()) else { return };
-    let is_error = block.get("is_error").and_then(serde_json::Value::as_bool).unwrap_or(false);
-    let raw_output = stringify_tool_result_content(block.get("content"));
-    let status = if is_error { "failed" } else { "completed" };
-
-    let fields = ToolCallUpdateFields {
-        status: Some(status.to_owned()),
-        raw_output: raw_output.clone(),
-        ..Default::default()
-    };
-
-    if let Some(base) = tool_calls.get_mut(tool_use_id) {
-        status.clone_into(&mut base.status);
-        if let Some(text) = raw_output.as_ref() {
-            base.raw_output = Some(text.clone());
-        }
-    }
-
-    out.push(SessionUpdate::ToolCallUpdate {
-        tool_call_update: ToolCallUpdate {
-            tool_call_id: tool_use_id.to_owned(),
-            fields,
-        },
-    });
-}
-
-/// Best-effort stringification of a `tool_result.content` payload.
-/// The CLI accepts string OR array-of-blocks. For arrays we collect
-/// all `{ "type": "text", "text": ... }` entries and join. Anything
-/// else falls back to `serde_json::to_string`. Mirrors upstream's
-/// `normalizeToolResultText` minus the per-tool richness (Read/Bash/
-/// Write/Agent), which can be layered on without changing this shape.
-fn stringify_tool_result_content(content: Option<&serde_json::Value>) -> Option<String> {
-    let content = content?;
-    if let Some(s) = content.as_str() {
-        return Some(s.to_owned());
-    }
-    if let Some(arr) = content.as_array() {
-        let mut chunks: Vec<String> = Vec::new();
-        for item in arr {
-            if item.get("type").and_then(|v| v.as_str()) == Some("text")
-                && let Some(text) = item.get("text").and_then(|v| v.as_str())
-            {
-                chunks.push(text.to_owned());
-            }
-        }
-        if !chunks.is_empty() {
-            return Some(chunks.join("\n"));
-        }
-    }
-    serde_json::to_string(content).ok()
+    // bridge::history walks raw `serde_json::Value` envelopes; turn
+    // each typed `SessionMessage` into the JSONL-shape it expects
+    // (`{type, message: {role, content}, parent_tool_use_id?}`).
+    let raw: Vec<serde_json::Value> = messages
+        .into_iter()
+        .map(|m| {
+            let kind = match m.kind {
+                forge_sdk::SessionMessageKind::User => "user",
+                forge_sdk::SessionMessageKind::Assistant => "assistant",
+            };
+            serde_json::json!({
+                "type": kind,
+                "message": m.message,
+                "parent_tool_use_id": m.parent_tool_use_id,
+            })
+        })
+        .collect();
+    crate::agent::bridge::history::map_session_messages_to_updates(&raw)
 }
 
 /// Scan the on-disk JSONL transcripts for `cwd` and convert them into

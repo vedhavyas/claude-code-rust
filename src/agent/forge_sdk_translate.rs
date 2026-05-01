@@ -29,7 +29,8 @@
 
 use forge_sdk::{AssistantEnvelope, ContentBlock as SdkContentBlock, Message as SdkMessage};
 
-use crate::agent::types::{ContentBlock as TuiContentBlock, SessionUpdate, ToolCall};
+use crate::agent::bridge::tooling::create_tool_call;
+use crate::agent::types::{ContentBlock as TuiContentBlock, SessionUpdate};
 use crate::agent::wire::BridgeEvent;
 
 /// Translate one SDK message into zero, one, or many `BridgeEvent`s.
@@ -149,33 +150,18 @@ fn content_block_to_update(block: &SdkContentBlock) -> Option<SessionUpdate> {
         SdkContentBlock::Thinking { thinking, .. } => Some(SessionUpdate::AgentThoughtChunk {
             content: TuiContentBlock::Text { text: thinking.clone() },
         }),
-        SdkContentBlock::ToolUse { id, name, input } => Some(SessionUpdate::ToolCall {
-            tool_call: synth_tool_call(id.clone(), name, Some(input)),
-        }),
+        SdkContentBlock::ToolUse { id, name, input } => {
+            // Status starts at "in_progress" mirroring upstream's
+            // emitToolCall — `create_tool_call` defaults to "pending"
+            // so we patch it here to match.
+            let mut tool_call = create_tool_call(id, name, input, None);
+            "in_progress".clone_into(&mut tool_call.status);
+            Some(SessionUpdate::ToolCall { tool_call })
+        }
         // ToolResult, ServerToolUse / ServerToolResult, Document,
         // Image, Unknown -- not surfaced to the UI yet. The lifted UI
         // renderers learn these shapes incrementally.
         _ => None,
-    }
-}
-
-fn synth_tool_call(
-    tool_call_id: String,
-    tool_name: &str,
-    raw_input: Option<&serde_json::Value>,
-) -> ToolCall {
-    ToolCall {
-        tool_call_id,
-        title: tool_name.to_owned(),
-        kind: "execute".to_owned(),
-        status: "pending".to_owned(),
-        content: Vec::new(),
-        raw_input: raw_input.cloned(),
-        raw_output: None,
-        output_metadata: None,
-        task_metadata: None,
-        locations: Vec::new(),
-        meta: None,
     }
 }
 
@@ -259,7 +245,9 @@ mod tests {
             panic!("second not ToolCall");
         };
         assert_eq!(tool_call.tool_call_id, "tu_x");
-        assert_eq!(tool_call.title, "Bash");
+        // create_tool_call extracts command for Bash-tool title.
+        assert_eq!(tool_call.title, "ls");
+        assert_eq!(tool_call.kind, "execute");
         assert_eq!(tool_call.raw_input, Some(json!({ "command": "ls" })));
     }
 
