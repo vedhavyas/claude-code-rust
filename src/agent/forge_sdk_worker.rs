@@ -132,10 +132,11 @@ async fn dispatch(
 ) -> anyhow::Result<()> {
     use ForgeSdkCommand as C;
     match cmd {
-        C::NewSession { cwd, launch_settings: _ } => {
+        C::NewSession { cwd, launch_settings } => {
             let options = build_options_with_callback(
                 &cwd,
                 None,
+                &launch_settings,
                 event_tx,
                 pending,
                 pending_questions,
@@ -143,12 +144,13 @@ async fn dispatch(
             );
             spawn_or_replace(state, event_tx, options, session_id_slot, bridge_session, None).await
         }
-        C::ResumeSession { session_id, launch_settings: _ } => {
+        C::ResumeSession { session_id, launch_settings } => {
             // Resume by passing the prior session id to the CLI. The
             // CLI itself decides what cwd to use; we don't override.
             let options = build_options_with_callback(
                 "",
                 Some(&session_id),
+                &launch_settings,
                 event_tx,
                 pending,
                 pending_questions,
@@ -479,12 +481,12 @@ async fn spawn_or_replace(
         .and_then(serde_json::Value::as_str)
         .unwrap_or("")
         .to_owned();
-    // Mirror upstream's `initialSessionMode(launchSettings)` default
-    // — bridge.ts seeds `session.mode = "default"` before system/init
-    // arrives and only swaps when init carries an explicit
-    // permissionMode. Falling through to None here was making the
-    // TUI footer's mode/model/effort chip strip disappear because
-    // `app.mode == None` short-circuits build_primary_line.
+    // The CLI's system/init payload echoes the mode it was launched
+    // with. We pass --permission-mode through `OptionsBuilder` from
+    // launch_settings.settings.permissions.defaultMode, so by the
+    // time spawn returns the init payload should reflect that. Fall
+    // back to Default only when the init really doesn't carry one
+    // (otherwise the footer chip strip wouldn't render at all).
     let init_permission_mode = init_record
         .and_then(|r| r.get("permissionMode"))
         .and_then(serde_json::Value::as_str)
@@ -726,6 +728,7 @@ fn parse_permission_mode(mode: &str) -> anyhow::Result<PermissionMode> {
 fn build_options_with_callback(
     cwd: &str,
     resume: Option<&str>,
+    launch_settings: &crate::agent::wire::SessionLaunchSettings,
     event_tx: &mpsc::UnboundedSender<BridgeEvent>,
     pending: &PendingResponses,
     pending_questions: &PendingQuestions,
@@ -755,6 +758,27 @@ fn build_options_with_callback(
     }
     if let Some(id) = resume {
         b = b.resume(id);
+    }
+
+    // Mirror upstream's `startupPermissionModeOptions` +
+    // `startupModelOption`: read launch_settings.settings.permissions.defaultMode
+    // and launch_settings.settings.model so the CLI starts in the right
+    // mode + model. Without this, the CLI starts in default Ask mode
+    // and shows the wrong chip in the footer.
+    if let Some(settings_value) = launch_settings.settings.as_ref()
+        && let Some(settings_record) = settings_value.as_object()
+    {
+        if let Some(perms) = settings_record.get("permissions").and_then(serde_json::Value::as_object)
+            && let Some(default_mode_str) = perms.get("defaultMode").and_then(serde_json::Value::as_str)
+            && let Ok(mode) = parse_permission_mode(default_mode_str)
+        {
+            b = b.permission_mode(mode);
+        }
+        if let Some(model) = settings_record.get("model").and_then(serde_json::Value::as_str)
+            && !model.trim().is_empty()
+        {
+            b = b.model(model);
+        }
     }
     b.build()
 }
