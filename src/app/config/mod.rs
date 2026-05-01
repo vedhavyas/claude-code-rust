@@ -1273,12 +1273,7 @@ impl ConfigState {
         }
     }
 
-    fn apply_loaded(
-        &mut self,
-        loaded: store::LoadedSettingsDocuments,
-        notice: Option<String>,
-        preserve_status: bool,
-    ) {
+    fn apply_loaded(&mut self, loaded: store::LoadedSettingsDocuments, preserve_status: bool) {
         self.settings_path = Some(loaded.paths.settings);
         self.local_settings_path = Some(loaded.paths.local_settings);
         self.preferences_path = Some(loaded.paths.preferences);
@@ -1291,10 +1286,8 @@ impl ConfigState {
         self.settings_scroll_offset = self.settings_scroll_offset.min(self.selected_setting_index);
         self.mcp_selected_server_index = 0;
         if !preserve_status {
-            self.status_message = notice;
+            self.status_message = None;
             self.last_error = None;
-        } else if let Some(notice) = notice {
-            self.status_message = Some(notice);
         }
     }
 }
@@ -1397,8 +1390,7 @@ pub fn setting_detail_options(app: &App, spec: &SettingSpec) -> Vec<String> {
 
 pub fn initialize_shared_state(app: &mut App) -> Result<(), String> {
     let loaded = store::load(app.settings_home_override.as_deref(), Some(project_root(app)))?;
-    let notice = loaded.notice.clone();
-    app.config.apply_loaded(loaded, notice, false);
+    app.config.apply_loaded(loaded, false);
     app.reconcile_runtime_from_persisted_settings_change();
     Ok(())
 }
@@ -1409,8 +1401,7 @@ pub fn open(app: &mut App) -> Result<(), String> {
     }
 
     let loaded = store::load(app.settings_home_override.as_deref(), Some(project_root(app)))?;
-    let notice = loaded.notice.clone();
-    app.config.apply_loaded(loaded, notice, false);
+    app.config.apply_loaded(loaded, false);
     app.reconcile_runtime_from_persisted_settings_change();
     view::set_active_view(app, ActiveView::Config);
     request_active_tab_side_effects(app);

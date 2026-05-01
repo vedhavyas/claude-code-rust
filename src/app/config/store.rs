@@ -39,7 +39,6 @@ pub struct LoadedSettingsDocuments {
     pub settings_document: Value,
     pub local_settings_document: Value,
     pub preferences_document: Value,
-    pub notice: Option<String>,
 }
 
 pub fn load(
@@ -47,22 +46,35 @@ pub fn load(
     project_root_override: Option<&Path>,
 ) -> Result<LoadedSettingsDocuments, String> {
     let paths = resolve_paths(home_override, project_root_override)?;
-    let (settings_document, settings_notice) = load_document(&paths.settings)?;
-    let (local_settings_document, local_settings_notice) = load_document(&paths.local_settings)?;
-    let (preferences_document, preferences_notice) = load_document(&paths.preferences)?;
 
-    let notices = [settings_notice, local_settings_notice, preferences_notice]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-    let notice = (!notices.is_empty()).then(|| notices.join(" "));
+    // Production path delegates to forge-sdk so the same
+    // `$CLAUDE_CONFIG_DIR`-respecting reader is used everywhere. Test
+    // fixtures pass home_override / project_root_override and bypass
+    // forge-sdk because env vars are process-global and would race
+    // across parallel test runs.
+    let (settings_document, local_settings_document, preferences_document) =
+        if home_override.is_none() && project_root_override.is_none() {
+            let cwd = std::env::current_dir()
+                .map_err(|err| format!("Failed to resolve current directory: {err}"))?;
+            let docs = forge_sdk::settings_documents(&cwd);
+            (
+                docs.user.unwrap_or_else(empty_object),
+                docs.project_local.unwrap_or_else(empty_object),
+                docs.preferences.unwrap_or_else(empty_object),
+            )
+        } else {
+            (
+                read_json_or_empty(&paths.settings),
+                read_json_or_empty(&paths.local_settings),
+                read_json_or_empty(&paths.preferences),
+            )
+        };
 
     Ok(LoadedSettingsDocuments {
         paths,
         settings_document,
         local_settings_document,
         preferences_document,
-        notice,
     })
 }
 
@@ -397,35 +409,16 @@ fn resolve_paths(
     })
 }
 
-fn load_document(path: &Path) -> Result<(Value, Option<String>), String> {
-    match std::fs::read_to_string(path) {
-        Ok(raw) => parse_document(path, &raw),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            Ok((Value::Object(Map::new()), None))
-        }
-        Err(err) => Err(format!("Failed to read settings file: {err}")),
-    }
+fn empty_object() -> Value {
+    Value::Object(Map::new())
 }
 
-fn parse_document(path: &Path, raw: &str) -> Result<(Value, Option<String>), String> {
-    if let Ok(Value::Object(object)) = serde_json::from_str::<Value>(raw) {
-        Ok((Value::Object(object), None))
-    } else {
-        let backup = backup_malformed_file(path)?;
-        Ok((
-            Value::Object(Map::new()),
-            Some(format!("Malformed settings file backed up to {}", backup.display())),
-        ))
-    }
-}
-
-fn backup_malformed_file(path: &Path) -> Result<PathBuf, String> {
-    let stamp =
-        SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_secs());
-    let backup = path.with_extension(format!("json.bak.{stamp}"));
-    std::fs::copy(path, &backup)
-        .map_err(|err| format!("Failed to back up malformed settings file: {err}"))?;
-    Ok(backup)
+fn read_json_or_empty(path: &Path) -> Value {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(empty_object)
 }
 
 fn unique_temp_path(parent: &Path, filename_hint: Option<&str>) -> PathBuf {
@@ -527,7 +520,6 @@ mod tests {
         assert_eq!(loaded.settings_document, Value::Object(Map::new()));
         assert_eq!(loaded.local_settings_document, Value::Object(Map::new()));
         assert_eq!(loaded.preferences_document, Value::Object(Map::new()));
-        assert!(loaded.notice.is_none());
         assert_eq!(loaded.paths.settings, dir.path().join(".claude").join("settings.json"));
         assert_eq!(
             loaded.paths.local_settings,
@@ -537,7 +529,11 @@ mod tests {
     }
 
     #[test]
-    fn load_malformed_preferences_file_creates_backup_and_preserves_settings() {
+    fn load_malformed_files_returns_empty_objects_silently() {
+        // forge-sdk's read path treats malformed JSON the same as a
+        // missing file — empty object, no notice, no backup. This is a
+        // deliberate simplification of the previous "rename to .bak +
+        // surface a banner" UX.
         let dir = tempfile::tempdir().expect("tempdir");
         let settings_path = dir.path().join(".claude").join("settings.json");
         let preferences_path = dir.path().join(".claude.json");
@@ -550,16 +546,6 @@ mod tests {
 
         assert_eq!(fast_mode(&loaded.settings_document), Ok(true));
         assert_eq!(loaded.preferences_document, Value::Object(Map::new()));
-        let notice = loaded.notice.expect("backup notice");
-        assert!(notice.contains("Malformed settings file backed up"));
-        let backups = std::fs::read_dir(dir.path())
-            .expect("read dir")
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|candidate| candidate != &preferences_path)
-            .filter(|candidate| candidate.file_name().is_some_and(|name| name != ".claude"))
-            .collect::<Vec<_>>();
-        assert_eq!(backups.len(), 1);
     }
 
     #[test]
