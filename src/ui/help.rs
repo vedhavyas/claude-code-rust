@@ -624,21 +624,6 @@ mod tests {
     }
 
     #[test]
-    fn key_tab_never_shows_ctrl_u_for_update_hiding() {
-        let mut app = App::test_default();
-        let items = build_help_items(&app);
-        assert!(!has_item(&items, "Ctrl+u", "Hide update hint"));
-
-        app.update_notice = Some(crate::app::UpdateNoticeState {
-            current_version: "0.11.1".into(),
-            latest_version: "0.11.2".into(),
-            emitted_session_scope_epoch: None,
-        });
-        let items = build_help_items(&app);
-        assert!(!has_item(&items, "Ctrl+u", "Hide update hint"));
-    }
-
-    #[test]
     fn permission_navigation_only_shown_when_permission_has_focus() {
         let mut app = App::test_default();
         app.pending_interaction_ids = vec!["perm-1".into(), "perm-2".into()];

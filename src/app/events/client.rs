@@ -106,9 +106,6 @@ pub fn handle_client_event(app: &mut App, event: ClientEvent) {
             crate::app::session_runtime::request_oauth_credentials_snapshot_refresh(app);
             crate::app::session_runtime::request_context_usage_refresh(app);
         }
-        ClientEvent::UpdateAvailable { latest_version, current_version } => {
-            session::handle_update_available_event(app, &latest_version, &current_version);
-        }
         ClientEvent::ServiceStatus { severity, message } => {
             session::handle_service_status_event(app, severity, &message);
         }

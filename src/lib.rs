@@ -52,10 +52,6 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// Disable startup update checks.
-    #[arg(long)]
-    pub no_update_check: bool,
-
     /// Working directory (defaults to cwd)
     #[arg(long, short = 'C')]
     pub dir: Option<std::path::PathBuf>,

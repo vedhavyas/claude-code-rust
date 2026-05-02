@@ -199,7 +199,6 @@ pub fn create_app(cli: &Cli) -> App {
         pending_images: Vec::new(),
         cached_todo_compact: None,
         git_context: super::git_context::GitContextState::default(),
-        update_notice: None,
         session_usage: super::SessionUsageState::default(),
         usage: super::UsageState::default(),
         mcp: super::McpState::default(),
@@ -341,7 +340,6 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let cli = Cli {
             command: None,
-            no_update_check: true,
             dir: Some(dir.path().to_path_buf()),
             enable_logs: false,
             diagnostics_preset: None,

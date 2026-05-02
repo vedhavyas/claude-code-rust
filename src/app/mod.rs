@@ -31,7 +31,6 @@ mod tab_title;
 mod terminal;
 mod todos;
 mod trust;
-mod update_check;
 pub(crate) mod usage;
 mod view;
 
@@ -60,12 +59,11 @@ pub use state::{
     RecentSessionInfo, ScrollbarGeometry, SelectionKind, SelectionPoint, SelectionState,
     SessionPickerState, SessionUsageState, SystemSeverity, TerminalSnapshotMode, TextBlock,
     TextBlockSpacing, TodoItem, TodoStatus, ToolCallInfo, ToolCallScope, TurnNoticeLocation,
-    TurnNoticeRef, UpdateNoticeState, UsageSnapshot, UsageSourceKind, UsageSourceMode, UsageState,
+    TurnNoticeRef, UsageSnapshot, UsageSourceKind, UsageSourceMode, UsageState,
     UsageWindow, WelcomeBlock, compute_scrollbar_geometry, hash_text_block_content,
     hash_welcome_block_content, is_execute_tool_name,
 };
 pub use trust::TrustSelection;
-pub use update_check::start_update_check;
 pub use view::ActiveView;
 
 use crate::agent::model;

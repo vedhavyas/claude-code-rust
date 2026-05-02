@@ -545,7 +545,6 @@ mod tests {
     fn resolve_log_path_uses_explicit_path_when_provided() {
         let cli = Cli {
             command: None,
-            no_update_check: false,
             dir: None,
             enable_logs: false,
             diagnostics_preset: None,
@@ -566,7 +565,6 @@ mod tests {
     fn resolve_log_path_uses_default_when_filter_enables_logging() {
         let cli = Cli {
             command: None,
-            no_update_check: false,
             dir: None,
             enable_logs: false,
             diagnostics_preset: None,
@@ -588,7 +586,6 @@ mod tests {
     fn resolve_log_path_uses_default_when_enable_logs_is_set() {
         let cli = Cli {
             command: None,
-            no_update_check: false,
             dir: None,
             enable_logs: true,
             diagnostics_preset: None,
@@ -608,7 +605,6 @@ mod tests {
     fn resolve_log_path_uses_default_when_preset_is_set() {
         let cli = Cli {
             command: None,
-            no_update_check: false,
             dir: None,
             enable_logs: false,
             diagnostics_preset: Some(DiagnosticsPreset::Session),
@@ -628,7 +624,6 @@ mod tests {
     fn resolve_perf_path_uses_default_when_enable_perf_is_set() {
         let cli = Cli {
             command: None,
-            no_update_check: false,
             dir: None,
             enable_logs: false,
             diagnostics_preset: None,
