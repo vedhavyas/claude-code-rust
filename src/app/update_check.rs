@@ -1,6 +1,13 @@
 // Copyright 2025 Simon Peter Rothgang
 // SPDX-License-Identifier: Apache-2.0
 
+// TODO: revisit whether the claude-rs binary self-version check
+// should route through the AgentBridge / forge-sdk too. Today it
+// reads ~/.cache/claude-rs/update-check.json + hits npm directly.
+// Deferred 2026-05-02; see
+// ~/.claude-nf/projects/-Users-vedhavyas-Projects-forge/memory/
+// handoff_2026_05_01_phase2_step1_credentials_lifted.md.
+
 use super::App;
 use crate::Cli;
 use crate::agent::events::ClientEvent;

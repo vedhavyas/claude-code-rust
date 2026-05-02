@@ -1,6 +1,10 @@
 // Copyright 2025 Simon Peter Rothgang
 // SPDX-License-Identifier: Apache-2.0
 
+use std::path::{Path, PathBuf};
+
+use async_trait::async_trait;
+
 use crate::agent::wire::SessionLaunchSettings;
 
 /// Behavioural seam between the TUI and the agent backend.
@@ -11,9 +15,24 @@ use crate::agent::wire::SessionLaunchSettings;
 /// across `app/*`. The current production implementation is
 /// [`crate::agent::forge_sdk_bridge::ForgeSdkBridge`].
 ///
-/// All methods are fire-and-forget — outcomes flow back through the
-/// existing [`crate::agent::wire::BridgeEvent`] stream rather than the
-/// trait return value.
+/// Two method shapes coexist on this trait:
+///
+/// - **Fire-and-forget commands** — most session-lifecycle methods
+///   (`prompt_text`, `cancel`, `set_mode`, …) return
+///   `anyhow::Result<()>` and emit results back through the existing
+///   [`crate::agent::wire::BridgeEvent`] stream.
+/// - **Direct-return accessors** — synchronous reads/writes that
+///   return their result directly (`config_dir`, `oauth_credentials`,
+///   `settings_documents`, `write_settings_document`,
+///   `project_memory_path`) plus one async method (`oauth_usage`,
+///   does HTTPS). The `ForgeSdkBridge` impl delegates these to
+///   `forge_sdk::*` free functions today; a remote-daemon impl
+///   would do RPC over the same trait shape.
+///
+/// `#[async_trait(?Send)]` matches the
+/// `Rc<dyn AgentBridge>` single-threaded App-state model — futures
+/// returned by the trait don't need a `Send` bound.
+#[async_trait(?Send)]
 pub trait AgentBridge {
     fn prompt_text(&self, session_id: String, text: String) -> anyhow::Result<PromptResponse>;
 
@@ -115,6 +134,53 @@ pub trait AgentBridge {
         tool_call_id: String,
         outcome: crate::agent::types::QuestionOutcome,
     ) -> anyhow::Result<()>;
+
+    // ---- Direct-return accessors (lifted from forge_sdk::* free fns) ----
+
+    /// Resolve the Claude config directory. Honours
+    /// `$CLAUDE_CONFIG_DIR` (when set + non-empty) else falls back
+    /// to `$HOME/.claude`.
+    fn config_dir(&self) -> PathBuf;
+
+    /// Resolve the project's auto-memory file:
+    /// `<config_dir>/projects/<project_key>/memory/MEMORY.md`. The
+    /// returned path may not exist on disk; callers decide.
+    fn project_memory_path(&self, cwd: &Path) -> PathBuf;
+
+    /// Read OAuth credentials from `<config_dir>/.credentials.json`
+    /// or, on macOS, the matching keychain entry. Returns `None`
+    /// when no credentials are present.
+    fn oauth_credentials(&self) -> Option<forge_sdk::OauthCredentials>;
+
+    /// Read all three settings documents (user, project-local,
+    /// preferences) from disk. Each field is `None` when the
+    /// underlying file is missing or unreadable.
+    fn settings_documents(&self, cwd: &Path) -> forge_sdk::SettingsDocuments;
+
+    /// Atomically write a settings document to the path
+    /// [`forge_sdk::SettingsTarget`] resolves to.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`forge_sdk::Error`] when the underlying write fails
+    /// — see [`forge_sdk::write_settings_document`] for the failure
+    /// modes.
+    fn write_settings_document(
+        &self,
+        target: &forge_sdk::SettingsTarget,
+        document: &serde_json::Value,
+    ) -> Result<(), forge_sdk::Error>;
+
+    /// Fetch the OAuth usage payload from
+    /// `api.anthropic.com/api/oauth/usage`. The bearer token is
+    /// resolved internally; it never crosses the trait boundary.
+    ///
+    /// # Errors
+    ///
+    /// See [`forge_sdk::OauthUsageError`].
+    async fn oauth_usage(
+        &self,
+    ) -> Result<forge_sdk::OauthUsage, forge_sdk::OauthUsageError>;
 }
 
 #[derive(Debug, Clone)]

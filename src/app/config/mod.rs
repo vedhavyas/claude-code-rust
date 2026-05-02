@@ -1389,7 +1389,11 @@ pub fn setting_detail_options(app: &App, spec: &SettingSpec) -> Vec<String> {
 }
 
 pub fn initialize_shared_state(app: &mut App) -> Result<(), String> {
-    let loaded = store::load(app.settings_home_override.as_deref(), Some(project_root(app)))?;
+    let loaded = store::load(
+        app.settings_home_override.as_deref(),
+        Some(project_root(app)),
+        app.conn.as_deref(),
+    )?;
     app.config.apply_loaded(loaded, false);
     app.reconcile_runtime_from_persisted_settings_change();
     Ok(())
@@ -1400,7 +1404,11 @@ pub fn open(app: &mut App) -> Result<(), String> {
         return Err("Project trust must be accepted before opening settings".to_owned());
     }
 
-    let loaded = store::load(app.settings_home_override.as_deref(), Some(project_root(app)))?;
+    let loaded = store::load(
+        app.settings_home_override.as_deref(),
+        Some(project_root(app)),
+        app.conn.as_deref(),
+    )?;
     app.config.apply_loaded(loaded, false);
     app.reconcile_runtime_from_persisted_settings_change();
     view::set_active_view(app, ActiveView::Config);

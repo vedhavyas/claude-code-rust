@@ -187,7 +187,10 @@ fn api_provider_label(provider: &str) -> String {
 }
 
 fn resolve_memory_path(app: &App) -> String {
-    let memory_md = forge_sdk::project_memory_path(std::path::Path::new(&app.cwd_raw));
+    let Some(conn) = app.conn.as_ref() else {
+        return "(no connection)".to_owned();
+    };
+    let memory_md = conn.project_memory_path(std::path::Path::new(&app.cwd_raw));
     if memory_md.exists() {
         format!("auto memory ({})", memory_md.display())
     } else {

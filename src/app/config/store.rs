@@ -44,31 +44,32 @@ pub struct LoadedSettingsDocuments {
 pub fn load(
     home_override: Option<&Path>,
     project_root_override: Option<&Path>,
+    bridge: Option<&dyn crate::agent::client::AgentBridge>,
 ) -> Result<LoadedSettingsDocuments, String> {
-    let paths = resolve_paths(home_override, project_root_override)?;
+    let paths = resolve_paths(home_override, project_root_override, bridge)?;
 
-    // Production path delegates to forge-sdk so the same
+    // Production path delegates to the AgentBridge so the same
     // `$CLAUDE_CONFIG_DIR`-respecting reader is used everywhere. Test
-    // fixtures pass home_override / project_root_override and bypass
-    // forge-sdk because env vars are process-global and would race
-    // across parallel test runs.
-    let (settings_document, local_settings_document, preferences_document) =
-        if home_override.is_none() && project_root_override.is_none() {
+    // fixtures pass home_override / project_root_override (and `None`
+    // for `bridge`) and bypass the bridge — env vars are
+    // process-global and would race across parallel test runs.
+    let (settings_document, local_settings_document, preferences_document) = match bridge {
+        Some(bridge) if home_override.is_none() && project_root_override.is_none() => {
             let cwd = std::env::current_dir()
                 .map_err(|err| format!("Failed to resolve current directory: {err}"))?;
-            let docs = forge_sdk::settings_documents(&cwd);
+            let docs = bridge.settings_documents(&cwd);
             (
                 docs.user.unwrap_or_else(empty_object),
                 docs.project_local.unwrap_or_else(empty_object),
                 docs.preferences.unwrap_or_else(empty_object),
             )
-        } else {
-            (
-                read_json_or_empty(&paths.settings),
-                read_json_or_empty(&paths.local_settings),
-                read_json_or_empty(&paths.preferences),
-            )
-        };
+        }
+        _ => (
+            read_json_or_empty(&paths.settings),
+            read_json_or_empty(&paths.local_settings),
+            read_json_or_empty(&paths.preferences),
+        ),
+    };
 
     Ok(LoadedSettingsDocuments {
         paths,
@@ -379,6 +380,7 @@ pub fn set_preferred_notification_channel(document: &mut Value, channel: Preferr
 fn resolve_paths(
     home_override: Option<&Path>,
     project_root_override: Option<&Path>,
+    bridge: Option<&dyn crate::agent::client::AgentBridge>,
 ) -> Result<SettingsPaths, String> {
     let home = if let Some(path) = home_override {
         path.to_path_buf()
@@ -393,13 +395,14 @@ fn resolve_paths(
     };
 
     // User settings live under <config_dir>, which honours
-    // $CLAUDE_CONFIG_DIR — delegate to forge-sdk so the env var is
-    // resolved in exactly one place. The home_override case (used by
-    // tests) bypasses the env var entirely.
-    let settings = if home_override.is_some() {
-        home.join(CLAUDE_DIR).join(SETTINGS_FILENAME)
-    } else {
-        forge_sdk::claude_config_dir().join(SETTINGS_FILENAME)
+    // $CLAUDE_CONFIG_DIR — delegate to AgentBridge so the env var is
+    // resolved in exactly one place (and a remote-daemon bridge can
+    // surface its own `<config_dir>`). The home_override case (used
+    // by tests) and the no-bridge case (early init / disconnected)
+    // both bypass the bridge.
+    let settings = match (home_override, bridge) {
+        (None, Some(bridge)) => bridge.config_dir().join(SETTINGS_FILENAME),
+        (Some(_), _) | (None, None) => home.join(CLAUDE_DIR).join(SETTINGS_FILENAME),
     };
 
     Ok(SettingsPaths {
@@ -527,7 +530,7 @@ mod tests {
     fn load_missing_files_returns_empty_objects() {
         let dir = tempfile::tempdir().expect("tempdir");
 
-        let loaded = load(Some(dir.path()), Some(dir.path())).expect("load");
+        let loaded = load(Some(dir.path()), Some(dir.path()), None).expect("load");
 
         assert_eq!(loaded.settings_document, Value::Object(Map::new()));
         assert_eq!(loaded.local_settings_document, Value::Object(Map::new()));
@@ -554,7 +557,7 @@ mod tests {
         std::fs::write(&settings_path, r#"{"fastMode":true}"#).expect("write settings");
         std::fs::write(&preferences_path, "{ not-json").expect("write malformed");
 
-        let loaded = load(Some(dir.path()), Some(dir.path())).expect("load");
+        let loaded = load(Some(dir.path()), Some(dir.path()), None).expect("load");
 
         assert_eq!(fast_mode(&loaded.settings_document), Ok(true));
         assert_eq!(loaded.preferences_document, Value::Object(Map::new()));

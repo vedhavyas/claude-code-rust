@@ -34,7 +34,9 @@
 #![allow(dead_code)] // worker + dispatch land in follow-up commits
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
+use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::mpsc;
 
@@ -168,6 +170,7 @@ impl ForgeSdkBridge {
     }
 }
 
+#[async_trait(?Send)]
 impl AgentBridge for ForgeSdkBridge {
     fn prompt_text(
         &self,
@@ -351,6 +354,38 @@ impl AgentBridge for ForgeSdkBridge {
         outcome: QuestionOutcome,
     ) -> anyhow::Result<()> {
         self.send(ForgeSdkCommand::QuestionResponse { session_id, tool_call_id, outcome })
+    }
+
+    // ---- Direct-return accessors (delegate to forge_sdk::*) ----
+
+    fn config_dir(&self) -> PathBuf {
+        forge_sdk::claude_config_dir()
+    }
+
+    fn project_memory_path(&self, cwd: &Path) -> PathBuf {
+        forge_sdk::project_memory_path(cwd)
+    }
+
+    fn oauth_credentials(&self) -> Option<forge_sdk::OauthCredentials> {
+        forge_sdk::oauth_credentials()
+    }
+
+    fn settings_documents(&self, cwd: &Path) -> forge_sdk::SettingsDocuments {
+        forge_sdk::settings_documents(cwd)
+    }
+
+    fn write_settings_document(
+        &self,
+        target: &forge_sdk::SettingsTarget,
+        document: &Value,
+    ) -> Result<(), forge_sdk::Error> {
+        forge_sdk::write_settings_document(target, document)
+    }
+
+    async fn oauth_usage(
+        &self,
+    ) -> Result<forge_sdk::OauthUsage, forge_sdk::OauthUsageError> {
+        forge_sdk::oauth_usage().await
     }
 }
 

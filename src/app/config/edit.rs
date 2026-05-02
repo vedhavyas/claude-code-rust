@@ -279,18 +279,20 @@ where
     let mut next_document = app.config.document_for(spec.file).clone();
     edit(&mut next_document);
 
-    // Production path delegates to forge-sdk so the same atomic
-    // write + path resolution forge_sdk::settings_documents reads
-    // from is used everywhere. Test fixtures with home_override
-    // bypass forge-sdk because the env-based resolver would race
-    // across nextest's parallel runs (same reasoning as load()).
-    let save_result = if app.settings_home_override.is_none() {
-        let cwd = std::path::PathBuf::from(&app.cwd_raw);
-        let target = store::settings_target_for(spec.file, cwd);
-        forge_sdk::write_settings_document(&target, &next_document)
-            .map_err(|err| format!("Failed to write settings: {err}"))
-    } else {
-        store::save(&path, &next_document)
+    // Production path delegates to the AgentBridge so the same atomic
+    // write + `$CLAUDE_CONFIG_DIR`-respecting path resolution that
+    // settings reads use is shared with writes. Test fixtures with
+    // home_override (and the disconnected case where app.conn is
+    // None) keep the direct fs save — env vars are process-global
+    // and would race across nextest's parallel runs.
+    let save_result = match (&app.settings_home_override, app.conn.as_ref()) {
+        (None, Some(conn)) => {
+            let cwd = std::path::PathBuf::from(&app.cwd_raw);
+            let target = store::settings_target_for(spec.file, cwd);
+            conn.write_settings_document(&target, &next_document)
+                .map_err(|err| format!("Failed to write settings: {err}"))
+        }
+        _ => store::save(&path, &next_document),
     };
 
     match save_result {

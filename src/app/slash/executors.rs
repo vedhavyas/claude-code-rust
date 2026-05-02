@@ -467,7 +467,10 @@ fn handle_login_submit(app: &mut App, args: &[&str]) -> bool {
                     exit_code = ?status.code(),
                 );
                 if status.success() {
-                    if forge_sdk::oauth_credentials().is_none() {
+                    let creds_present = conn
+                        .as_ref()
+                        .is_some_and(|c| c.oauth_credentials().is_some());
+                    if !creds_present {
                         let _ = tx.send(ClientEvent::SlashCommandError(
                             "Login exited successfully but no credentials were saved. \
                              Try /login again or run `claude auth login` in another terminal."
@@ -530,6 +533,7 @@ fn handle_logout_submit(app: &mut App, args: &[&str]) -> bool {
     set_command_pending(app, "Signing out...", None);
 
     let tx = app.event_tx.clone();
+    let conn = app.conn.clone();
     tokio::task::spawn_local(async move {
         tracing::debug!(
             target: crate::logging::targets::APP_AUTH,
@@ -562,7 +566,10 @@ fn handle_logout_submit(app: &mut App, args: &[&str]) -> bool {
                     exit_code = ?status.code(),
                 );
                 if status.success() {
-                    if forge_sdk::oauth_credentials().is_some() {
+                    let creds_still_present = conn
+                        .as_ref()
+                        .is_some_and(|c| c.oauth_credentials().is_some());
+                    if creds_still_present {
                         let _ = tx.send(ClientEvent::SlashCommandError(
                             "Logout exited successfully but credentials are still present. \
                              Try /logout again or run `claude auth logout` in another terminal."

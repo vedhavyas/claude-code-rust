@@ -33,10 +33,15 @@ pub(crate) fn request_refresh(app: &mut App) {
     let epoch = app.session_scope_epoch;
     let source_mode = app.usage.active_source;
     let cwd_raw = app.cwd_raw.clone();
+    // Optional — the CLI fallback path doesn't need a connection,
+    // and tests sometimes drive the lifecycle without a bridge. The
+    // OAuth path bails with a clear "no connection" error when conn
+    // is None.
+    let conn = app.conn.clone();
 
     tokio::task::spawn_local(async move {
         let _ = event_tx.send(ClientEvent::UsageRefreshStarted { epoch });
-        match refresh_snapshot(source_mode, cwd_raw).await {
+        match refresh_snapshot(source_mode, cwd_raw, conn.as_deref()).await {
             Ok(snapshot) => {
                 let _ = event_tx.send(ClientEvent::UsageSnapshotReceived { epoch, snapshot });
             }
@@ -136,21 +141,43 @@ fn format_remaining_until(target: SystemTime) -> String {
 async fn refresh_snapshot(
     source_mode: UsageSourceMode,
     cwd_raw: String,
+    conn: Option<&dyn crate::agent::client::AgentBridge>,
 ) -> Result<UsageSnapshot, UsageRefreshFailure> {
     match source_mode {
-        UsageSourceMode::Oauth => oauth::fetch_snapshot().await.map_err(|error| UsageRefreshFailure {
-            source: UsageSourceKind::Oauth,
-            message: error.into_message(),
-        }),
+        UsageSourceMode::Oauth => fetch_oauth_via_bridge(conn).await,
         UsageSourceMode::Cli => cli::fetch_snapshot(cwd_raw)
             .await
             .map_err(|message| UsageRefreshFailure { source: UsageSourceKind::Cli, message }),
-        UsageSourceMode::Auto => refresh_snapshot_auto(cwd_raw).await,
+        UsageSourceMode::Auto => refresh_snapshot_auto(cwd_raw, conn).await,
     }
 }
 
-async fn refresh_snapshot_auto(cwd_raw: String) -> Result<UsageSnapshot, UsageRefreshFailure> {
-    match oauth::fetch_snapshot().await {
+async fn fetch_oauth_via_bridge(
+    conn: Option<&dyn crate::agent::client::AgentBridge>,
+) -> Result<UsageSnapshot, UsageRefreshFailure> {
+    let Some(conn) = conn else {
+        return Err(UsageRefreshFailure {
+            source: UsageSourceKind::Oauth,
+            message: "Bridge connection required for OAuth usage fetch.".to_owned(),
+        });
+    };
+    oauth::fetch_snapshot(conn).await.map_err(|error| UsageRefreshFailure {
+        source: UsageSourceKind::Oauth,
+        message: error.into_message(),
+    })
+}
+
+async fn refresh_snapshot_auto(
+    cwd_raw: String,
+    conn: Option<&dyn crate::agent::client::AgentBridge>,
+) -> Result<UsageSnapshot, UsageRefreshFailure> {
+    let oauth_result = match conn {
+        Some(conn) => oauth::fetch_snapshot(conn).await,
+        None => Err(oauth::OauthFetchError::Unavailable(
+            "Bridge connection required for OAuth usage fetch.".to_owned(),
+        )),
+    };
+    match oauth_result {
         Ok(snapshot) => Ok(snapshot),
         Err(error) if error.should_fallback_to_cli() => {
             let oauth_message = error.into_message();
