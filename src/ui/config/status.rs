@@ -187,22 +187,12 @@ fn api_provider_label(provider: &str) -> String {
 }
 
 fn resolve_memory_path(app: &App) -> String {
-    let Some(home) = dirs::home_dir() else {
-        return "(unable to resolve home directory)".to_owned();
-    };
-    let encoded = encode_project_path(&app.cwd_raw);
-    let memory_md =
-        home.join(".claude").join("projects").join(&encoded).join("memory").join("MEMORY.md");
-
+    let memory_md = forge_sdk::project_memory_path(std::path::Path::new(&app.cwd_raw));
     if memory_md.exists() {
         format!("auto memory ({})", memory_md.display())
     } else {
         "(no memory file found)".to_owned()
     }
-}
-
-pub(crate) fn encode_project_path(cwd: &str) -> String {
-    cwd.replace(['/', '\\'], "-").replace(':', "-").trim_start_matches('-').to_owned()
 }
 
 fn setting_sources(app: &App) -> String {
@@ -281,19 +271,6 @@ mod tests {
         assert!(text.contains("Session"));
         assert!(text.contains("Model"));
         assert!(text.contains("Settings"));
-    }
-
-    #[test]
-    fn encode_project_path_unix() {
-        assert_eq!(encode_project_path("/home/user/project"), "home-user-project");
-    }
-
-    #[test]
-    fn encode_project_path_windows() {
-        assert_eq!(
-            encode_project_path("C:\\Users\\User\\Desktop\\project"),
-            "C--Users-User-Desktop-project"
-        );
     }
 
     #[test]
