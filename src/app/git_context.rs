@@ -1,6 +1,15 @@
 // Copyright 2025 Simon Peter Rothgang
 // SPDX-License-Identifier: Apache-2.0
 
+// TODO: lift git introspection through the AgentBridge — forge-sdk
+// owns the .git/HEAD read + branch/dirty resolution; this module
+// becomes a thin TUI cache that consumes BridgeEvent::GitContextSnapshot
+// updates pushed by a SDK-side watcher (or polled via direct sdk
+// call). Deferred 2026-05-02; see
+// ~/.claude-nf/projects/-Users-vedhavyas-Projects-forge/memory/
+// handoff_2026_05_01_phase2_step1_credentials_lifted.md for the
+// three-option breakdown to revisit.
+
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::BTreeMap;
 use std::fs;
