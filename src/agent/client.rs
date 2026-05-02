@@ -135,6 +135,23 @@ pub trait AgentBridge {
         outcome: crate::agent::types::QuestionOutcome,
     ) -> anyhow::Result<()>;
 
+    /// Start watching `cwd`'s `.git` machinery for branch changes.
+    /// Snapshots flow back via `BridgeEvent::GitContextSnapshot`
+    /// (initial state queued before the call returns; subsequent
+    /// snapshots only on actual branch change). Calling again with
+    /// the same `session_id` aborts and replaces any existing
+    /// watcher for that session.
+    fn start_git_context_watch(
+        &self,
+        session_id: String,
+        cwd: PathBuf,
+    ) -> anyhow::Result<()>;
+
+    /// Stop the git-context watcher for `session_id`. No-op when no
+    /// watcher is active. Watchers also stop automatically when the
+    /// session closes / the bridge worker shuts down.
+    fn stop_git_context_watch(&self, session_id: String) -> anyhow::Result<()>;
+
     // ---- Direct-return accessors (lifted from forge_sdk::* free fns) ----
 
     /// Resolve the Claude config directory. Honours

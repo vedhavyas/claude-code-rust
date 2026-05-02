@@ -938,12 +938,13 @@ impl App {
         self.git_context.branch_name()
     }
 
-    pub fn sync_git_context(&mut self) {
-        self.needs_redraw |= self.git_context.sync_to_cwd(Path::new(&self.cwd_raw));
-    }
-
-    pub fn tick_git_context(&mut self, now: Instant) {
-        self.needs_redraw |= self.git_context.tick(Path::new(&self.cwd_raw), now);
+    /// Apply a bridge-pushed git context snapshot to the local
+    /// cache. Marks `needs_redraw` when the resolved branch changes.
+    pub fn apply_git_context_snapshot(
+        &mut self,
+        info: crate::agent::types::GitContextInfo,
+    ) {
+        self.needs_redraw |= self.git_context.apply_snapshot(info);
     }
 
     #[cfg(test)]

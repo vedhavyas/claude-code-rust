@@ -22,7 +22,6 @@ pub(super) fn reset_for_new_session(
     reset_interaction_state_for_new_session(app);
     reset_render_state_for_new_session(app);
     reset_cache_and_footer_state_for_new_session(app);
-    app.sync_git_context();
 }
 
 fn reset_session_identity_state(

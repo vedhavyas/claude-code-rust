@@ -81,6 +81,13 @@ pub enum ForgeSdkCommand {
     GetOauthCredentialsSnapshot {
         session_id: String,
     },
+    StartGitContextWatch {
+        session_id: String,
+        cwd: PathBuf,
+    },
+    StopGitContextWatch {
+        session_id: String,
+    },
     GetContextUsage {
         session_id: String,
     },
@@ -243,6 +250,18 @@ impl AgentBridge for ForgeSdkBridge {
 
     fn get_oauth_credentials_snapshot(&self, session_id: String) -> anyhow::Result<()> {
         self.send(ForgeSdkCommand::GetOauthCredentialsSnapshot { session_id })
+    }
+
+    fn start_git_context_watch(
+        &self,
+        session_id: String,
+        cwd: PathBuf,
+    ) -> anyhow::Result<()> {
+        self.send(ForgeSdkCommand::StartGitContextWatch { session_id, cwd })
+    }
+
+    fn stop_git_context_watch(&self, session_id: String) -> anyhow::Result<()> {
+        self.send(ForgeSdkCommand::StopGitContextWatch { session_id })
     }
 
     fn get_context_usage(&self, session_id: String) -> anyhow::Result<()> {

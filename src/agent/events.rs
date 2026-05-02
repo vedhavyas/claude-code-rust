@@ -90,6 +90,12 @@ pub enum ClientEvent {
         session_id: String,
         credentials: Option<crate::agent::types::OauthCredentialsInfo>,
     },
+    /// Git introspection snapshot pushed by the bridge whenever the
+    /// repo's branch resolution changes (initial state included).
+    GitContextSnapshotReceived {
+        session_id: String,
+        context: crate::agent::types::GitContextInfo,
+    },
     /// Session context window usage received from bridge.
     ContextUsageReceived { session_id: String, percentage: Option<u8> },
     /// MCP server snapshot received from bridge.

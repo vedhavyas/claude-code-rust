@@ -127,6 +127,10 @@ pub enum BridgeEvent {
         session_id: String,
         credentials: Option<types::OauthCredentialsInfo>,
     },
+    GitContextSnapshot {
+        session_id: String,
+        context: types::GitContextInfo,
+    },
     ContextUsage {
         session_id: String,
         percentage: Option<u8>,
@@ -163,6 +167,7 @@ impl BridgeEvent {
             Self::SessionsListed { .. } => "sessions_listed",
             Self::StatusSnapshot { .. } => "status_snapshot",
             Self::OauthCredentialsSnapshot { .. } => "oauth_credentials_snapshot",
+            Self::GitContextSnapshot { .. } => "git_context_snapshot",
             Self::ContextUsage { .. } => "context_usage",
             Self::McpSnapshot { .. } => "mcp_snapshot",
         }
@@ -187,6 +192,7 @@ impl BridgeEvent {
             | Self::SessionReplaced { session_id, .. }
             | Self::StatusSnapshot { session_id, .. }
             | Self::OauthCredentialsSnapshot { session_id, .. }
+            | Self::GitContextSnapshot { session_id, .. }
             | Self::ContextUsage { session_id, .. }
             | Self::McpSnapshot { session_id, .. } => Some(session_id.as_str()),
             Self::AuthRequired { .. }
@@ -221,6 +227,7 @@ impl BridgeEvent {
             | Self::SessionsListed { .. }
             | Self::StatusSnapshot { .. }
             | Self::OauthCredentialsSnapshot { .. }
+            | Self::GitContextSnapshot { .. }
             | Self::ContextUsage { .. }
             | Self::McpSnapshot { .. } => None,
         }

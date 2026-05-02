@@ -182,6 +182,22 @@ pub fn handle_client_event(app: &mut App, event: ClientEvent) {
                 has_expiry,
             );
         }
+        ClientEvent::GitContextSnapshotReceived { session_id, context } => {
+            if app.session_id.as_ref().map(ToString::to_string).as_deref()
+                != Some(session_id.as_str())
+            {
+                tracing::debug!(
+                    target: crate::logging::targets::APP_SESSION,
+                    event_name = "git_context_snapshot_dropped",
+                    message = "git context snapshot dropped for a stale session",
+                    outcome = "dropped",
+                    session_id = %session_id,
+                    reason = "stale_session",
+                );
+                return;
+            }
+            app.apply_git_context_snapshot(context);
+        }
         ClientEvent::ContextUsageReceived { session_id, percentage } => {
             if app.session_id.as_ref().map(ToString::to_string).as_deref()
                 != Some(session_id.as_str())

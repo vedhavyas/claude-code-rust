@@ -397,7 +397,19 @@ fn sync_welcome_cwd(app: &mut App) {
 pub(super) fn apply_session_cwd(app: &mut App, cwd_raw: String) {
     app.cwd_raw = cwd_raw;
     app.cwd = shorten_cwd_display(&app.cwd_raw);
-    app.sync_git_context();
+    // Spin up (or restart) the bridge-side git watcher for this
+    // session's cwd. The bridge worker dedupes if a watcher already
+    // exists for this session_id.
+    if let (Some(conn), Some(session_id)) = (app.conn.as_ref(), app.session_id.as_ref()) {
+        let cwd = std::path::PathBuf::from(&app.cwd_raw);
+        if let Err(err) = conn.start_git_context_watch(session_id.to_string(), cwd) {
+            tracing::warn!(
+                target: crate::logging::targets::APP_SESSION,
+                error = %err,
+                "failed to start git context watcher for session",
+            );
+        }
+    }
     sync_welcome_cwd(app);
     app.reconcile_trust_state_from_preferences_and_cwd();
 }

@@ -260,7 +260,6 @@ pub fn create_app(cli: &Cli) -> App {
     app.rebuild_history_retention_accounting();
     app.rebuild_render_cache_accounting();
     trust::initialize(&mut app);
-    app.sync_git_context();
     super::file_index::restart(&mut app);
     app
 }

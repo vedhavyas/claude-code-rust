@@ -80,6 +80,12 @@ pub async fn run_worker(
     let bridge_session: Arc<Mutex<bridge_state::BridgeSession>> =
         Arc::new(Mutex::new(bridge_state::BridgeSession::new(String::new(), String::new())));
     let mut state: WorkerState = WorkerState::Waiting;
+    // Per-session git watcher tasks. Keyed by session_id so a cwd
+    // change (or session replace) aborts the previous watcher before
+    // starting the new one. Lives in this run() stack so the workers
+    // tear down with the worker itself.
+    let mut git_watchers: std::collections::HashMap<String, tokio::task::JoinHandle<()>> =
+        std::collections::HashMap::new();
 
     while let Some(cmd) = command_rx.recv().await {
         if let Err(err) = dispatch(
@@ -90,6 +96,7 @@ pub async fn run_worker(
             &pending_questions,
             &session_id_slot,
             &bridge_session,
+            &mut git_watchers,
         )
         .await
         {
@@ -99,6 +106,12 @@ pub async fn run_worker(
                 "forge_sdk_worker: dispatch failed",
             );
         }
+    }
+
+    // Abort any in-flight git watchers so notify cleans up its
+    // OS-level subscriptions before the worker process exits.
+    for (_session_id, handle) in git_watchers.drain() {
+        handle.abort();
     }
 
     // Channel closed -- drop the client gracefully so the subprocess
@@ -120,7 +133,7 @@ enum WorkerState {
     },
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 async fn dispatch(
     state: &mut WorkerState,
     cmd: ForgeSdkCommand,
@@ -129,6 +142,7 @@ async fn dispatch(
     pending_questions: &PendingQuestions,
     session_id_slot: &Arc<Mutex<String>>,
     bridge_session: &Arc<Mutex<bridge_state::BridgeSession>>,
+    git_watchers: &mut std::collections::HashMap<String, tokio::task::JoinHandle<()>>,
 ) -> anyhow::Result<()> {
     use ForgeSdkCommand as C;
     match cmd {
@@ -273,6 +287,52 @@ async fn dispatch(
                 client.oauth_credentials().map(translate_oauth_credentials);
             let _ =
                 event_tx.send(BridgeEvent::OauthCredentialsSnapshot { session_id, credentials });
+            Ok(())
+        }
+        C::StartGitContextWatch { session_id, cwd } => {
+            // If a watcher already exists for this session_id, abort
+            // it before starting the replacement (handles cwd changes).
+            if let Some(existing) = git_watchers.remove(&session_id) {
+                existing.abort();
+            }
+
+            let mut watcher = match forge_sdk::GitContextWatcher::new(cwd.clone()) {
+                Ok(watcher) => watcher,
+                Err(err) => {
+                    tracing::warn!(
+                        target: crate::logging::targets::BRIDGE_LIFECYCLE,
+                        session_id = %session_id,
+                        cwd = %cwd.display(),
+                        error = %err,
+                        "failed to start git context watcher",
+                    );
+                    return Ok(());
+                }
+            };
+
+            let event_tx = event_tx.clone();
+            let task_session_id = session_id.clone();
+            let handle = tokio::task::spawn_local(async move {
+                while let Some(snapshot) = watcher.next_snapshot().await {
+                    let context = translate_git_context(snapshot);
+                    if event_tx
+                        .send(BridgeEvent::GitContextSnapshot {
+                            session_id: task_session_id.clone(),
+                            context,
+                        })
+                        .is_err()
+                    {
+                        break; // bridge event_tx receiver dropped
+                    }
+                }
+            });
+            git_watchers.insert(session_id, handle);
+            Ok(())
+        }
+        C::StopGitContextWatch { session_id } => {
+            if let Some(handle) = git_watchers.remove(&session_id) {
+                handle.abort();
+            }
             Ok(())
         }
         C::GetContextUsage { session_id } => {
@@ -1178,6 +1238,19 @@ fn translate_oauth_credentials(
         access_token: info.access_token,
         expires_at_ms,
     }
+}
+
+fn translate_git_context(snapshot: forge_sdk::GitContext) -> crate::agent::types::GitContextInfo {
+    let branch = match snapshot.branch {
+        forge_sdk::GitBranch::Named(name) => crate::agent::types::GitBranchInfo::Named(name),
+        forge_sdk::GitBranch::Detached => crate::agent::types::GitBranchInfo::Detached,
+        forge_sdk::GitBranch::NoRepo => crate::agent::types::GitBranchInfo::NoRepo,
+        // forge_sdk::GitBranch is #[non_exhaustive] — explicit Unknown
+        // plus the wildcard for any future variants both surface as
+        // GitBranchInfo::Unknown (TUI renders no branch chip).
+        forge_sdk::GitBranch::Unknown | _ => crate::agent::types::GitBranchInfo::Unknown,
+    };
+    crate::agent::types::GitContextInfo { branch }
 }
 
 fn translate_mcp_server_status(

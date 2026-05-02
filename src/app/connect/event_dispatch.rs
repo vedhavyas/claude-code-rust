@@ -160,6 +160,9 @@ pub(super) fn handle_bridge_event(
                 credentials,
             });
         }
+        crate::agent::wire::BridgeEvent::GitContextSnapshot { session_id, context } => {
+            let _ = event_tx.send(ClientEvent::GitContextSnapshotReceived { session_id, context });
+        }
         crate::agent::wire::BridgeEvent::ContextUsage { session_id, percentage } => {
             let _ = event_tx.send(ClientEvent::ContextUsageReceived { session_id, percentage });
         }

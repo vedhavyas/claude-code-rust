@@ -548,6 +548,26 @@ pub struct OauthCredentialsInfo {
     pub expires_at_ms: Option<u64>,
 }
 
+/// Git introspection snapshot pushed by the bridge whenever the
+/// underlying repo's branch state changes. Mirrors
+/// `forge_sdk::GitContext` field-for-field at the worker boundary so
+/// the wire side stays decoupled from the SDK shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitContextInfo {
+    pub branch: GitBranchInfo,
+}
+
+/// Branch-resolution states surfaced by the bridge. `Named` carries
+/// the branch name; the other variants are TUI-display sentinels.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum GitBranchInfo {
+    Named(String),
+    Detached,
+    NoRepo,
+    Unknown,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum McpServerConnectionStatus {
