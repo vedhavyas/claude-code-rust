@@ -34,8 +34,10 @@ pub(super) fn handle_connected_client_event(
     if let Some(slot) = take_connection_slot() {
         app.conn = Some(slot.conn);
     }
+    let prev_session_id = app.session_id.as_ref().map(ToString::to_string);
     apply_session_cwd(app, cwd);
     reset_for_new_session(app, session_id, current_model, mode, true);
+    refresh_session_git_watcher(app, prev_session_id);
     app.available_models = available_models;
     app.sync_welcome_snapshot();
     if !history_updates.is_empty() {
@@ -303,9 +305,11 @@ pub(super) fn handle_session_replaced_event(
     super::clear_compaction_state(app, false);
     app.pending_cancel_origin = None;
     app.pending_auto_submit_after_cancel = false;
+    let prev_session_id = app.session_id.as_ref().map(ToString::to_string);
     apply_session_cwd(app, cwd);
     app.available_models = available_models;
     reset_for_new_session(app, session_id, current_model, mode, false);
+    refresh_session_git_watcher(app, prev_session_id);
     app.sync_welcome_snapshot();
     if !history_updates.is_empty() {
         load_resume_history(app, history_updates);
@@ -397,21 +401,40 @@ fn sync_welcome_cwd(app: &mut App) {
 pub(super) fn apply_session_cwd(app: &mut App, cwd_raw: String) {
     app.cwd_raw = cwd_raw;
     app.cwd = shorten_cwd_display(&app.cwd_raw);
-    // Spin up (or restart) the bridge-side git watcher for this
-    // session's cwd. The bridge worker dedupes if a watcher already
-    // exists for this session_id.
-    if let (Some(conn), Some(session_id)) = (app.conn.as_ref(), app.session_id.as_ref()) {
-        let cwd = std::path::PathBuf::from(&app.cwd_raw);
-        if let Err(err) = conn.start_git_context_watch(session_id.to_string(), cwd) {
-            tracing::warn!(
-                target: crate::logging::targets::APP_SESSION,
-                error = %err,
-                "failed to start git context watcher for session",
-            );
-        }
-    }
     sync_welcome_cwd(app);
     app.reconcile_trust_state_from_preferences_and_cwd();
+}
+
+/// Restart the bridge-side git watcher for the current session's
+/// cwd. Must be called AFTER `apply_session_cwd` (so `app.cwd_raw`
+/// is set) AND AFTER `reset_for_new_session` (so `app.session_id`
+/// is set to the new session). If `prev_session_id` is `Some`, its
+/// watcher is stopped first to prevent the bridge worker from
+/// accumulating zombie watchers across replaced sessions.
+pub(super) fn refresh_session_git_watcher(app: &App, prev_session_id: Option<String>) {
+    let Some(conn) = app.conn.as_ref() else {
+        return;
+    };
+    if let Some(prev) = prev_session_id
+        && let Err(err) = conn.stop_git_context_watch(prev)
+    {
+        tracing::warn!(
+            target: crate::logging::targets::APP_SESSION,
+            error = %err,
+            "failed to stop previous git context watcher",
+        );
+    }
+    let Some(session_id) = app.session_id.as_ref() else {
+        return;
+    };
+    let cwd = std::path::PathBuf::from(&app.cwd_raw);
+    if let Err(err) = conn.start_git_context_watch(session_id.to_string(), cwd) {
+        tracing::warn!(
+            target: crate::logging::targets::APP_SESSION,
+            error = %err,
+            "failed to start git context watcher for session",
+        );
+    }
 }
 
 fn reconcile_session_picker_selection(app: &mut App, selected_session_id: Option<&str>) {
