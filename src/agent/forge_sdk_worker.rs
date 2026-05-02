@@ -312,7 +312,12 @@ async fn dispatch(
 
             let event_tx = event_tx.clone();
             let task_session_id = session_id.clone();
-            let handle = tokio::task::spawn_local(async move {
+            // The worker runs on the multi-threaded tokio runtime
+            // (see `tokio::spawn(forge_sdk_worker::run_worker(...))`
+            // in app/connect/bridge_lifecycle.rs). Use `tokio::spawn`
+            // — `spawn_local` would panic with "spawn_local called
+            // from outside of a LocalSet".
+            let handle = tokio::spawn(async move {
                 while let Some(snapshot) = watcher.next_snapshot().await {
                     let context = translate_git_context(snapshot);
                     if event_tx
