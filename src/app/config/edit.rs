@@ -279,7 +279,21 @@ where
     let mut next_document = app.config.document_for(spec.file).clone();
     edit(&mut next_document);
 
-    match store::save(&path, &next_document) {
+    // Production path delegates to forge-sdk so the same atomic
+    // write + path resolution forge_sdk::settings_documents reads
+    // from is used everywhere. Test fixtures with home_override
+    // bypass forge-sdk because the env-based resolver would race
+    // across nextest's parallel runs (same reasoning as load()).
+    let save_result = if app.settings_home_override.is_none() {
+        let cwd = std::path::PathBuf::from(&app.cwd_raw);
+        let target = store::settings_target_for(spec.file, cwd);
+        forge_sdk::write_settings_document(&target, &next_document)
+            .map_err(|err| format!("Failed to write settings: {err}"))
+    } else {
+        store::save(&path, &next_document)
+    };
+
+    match save_result {
         Ok(()) => {
             *app.config.committed_document_for_mut(spec.file) = next_document;
             if previous_respect_gitignore

@@ -409,6 +409,18 @@ fn resolve_paths(
     })
 }
 
+/// Map the TUI's `SettingFile` enum onto forge-sdk's
+/// `SettingsTarget`. Used by `persist_setting_change` to delegate
+/// writes to the SDK while keeping `SettingFile` as the TUI-domain
+/// type that callers reason about.
+pub fn settings_target_for(file: super::SettingFile, cwd: PathBuf) -> forge_sdk::SettingsTarget {
+    match file {
+        super::SettingFile::Settings => forge_sdk::SettingsTarget::User,
+        super::SettingFile::LocalSettings => forge_sdk::SettingsTarget::ProjectLocal { cwd },
+        super::SettingFile::Preferences => forge_sdk::SettingsTarget::Preferences,
+    }
+}
+
 fn empty_object() -> Value {
     Value::Object(Map::new())
 }
